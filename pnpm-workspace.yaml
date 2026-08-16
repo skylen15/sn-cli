@@ -1,0 +1,16 @@
+overrides:
+  path-expression-matcher: 1.5.0
+
+# pnpm re-checks node_modules before every script. When it decides they are
+# stale it wants to purge, which needs a TTY to confirm — so `pnpm check` from
+# CI or an agent dies on a prompt it cannot answer. Run install explicitly.
+verifyDepsBeforeRun: false
+
+# pnpm blocks postinstall scripts unless listed here. All four belong to the
+# ServiceNow SDK's bundler/dev-server tooling, not to the auth deep import this
+# project actually uses (verified: that import loads with the builds blocked).
+allowBuilds:
+  "@parcel/watcher": false
+  "@swc/core": false
+  libxmljs2: false
+  msgpackr-extract: false

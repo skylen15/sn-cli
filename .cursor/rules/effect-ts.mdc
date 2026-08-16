@@ -1,0 +1,34 @@
+---
+description: Effect TypeScript library — setup and where to learn Effect APIs
+alwaysApply: true
+---
+
+# Effect
+
+This repository uses the Effect TypeScript library (`effect`, `@effect/platform-node`).
+
+## Learning more about Effect
+
+Before writing any Effect code, first read `node_modules/effect/AGENTS.md`
+**completely**, and follow the links in that file when required.
+
+If you need to learn more about particular Effect APIs and concepts that the
+guide doesn't cover, search the source code in `node_modules/effect/src`.
+
+Use only this vendored documentation and source. Ignore unrelated copies of
+Effect or external documentation — they may be outdated or incorrect.
+
+## Installing / upgrading
+
+Use pnpm (see `packageManager` in `package.json`):
+
+```bash
+pnpm add effect@beta
+```
+
+In a monorepo, install it as a root dev dependency so `node_modules/effect/src`
+stays reachable:
+
+```bash
+pnpm add -D effect@beta
+```

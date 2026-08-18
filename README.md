@@ -15,12 +15,20 @@ entry TypeScript directly; there is no build step.
 
 ## Install
 
-Quick install via [`install.sh`](./install.sh) — checks prerequisites (Node 24+,
-installs pnpm if missing), clones the repo into `~/.sn-cli`, and links `sn` onto
-your `PATH`:
+Quick install via [`install.sh`](./install.sh) from macOS, Linux, or Git Bash —
+it checks prerequisites (Node 24+, installs pnpm if missing), clones the repo
+into `~/.sn-cli`, and links `sn` onto your `PATH`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skylen15/sn-cli/main/install.sh | bash
+```
+
+From PowerShell, run [`install.ps1`](./install.ps1) instead. PowerShell and Git
+Bash can resolve PATH differently, so a Node installation visible to
+`node --version` in PowerShell may still require restarting Git Bash:
+
+```powershell
+irm https://raw.githubusercontent.com/skylen15/sn-cli/main/install.ps1 | iex
 ```
 
 Or install manually:

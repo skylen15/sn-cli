@@ -13,8 +13,17 @@ entry TypeScript directly; there is no build step.
 - **pnpm** (see `packageManager` in `package.json`)
 - A ServiceNow instance and credentials (see [Authentication](#authentication))
 
-
 ## Install
+
+Quick install via [`install.sh`](./install.sh) — checks prerequisites (Node 24+,
+installs pnpm if missing), clones the repo into `~/.sn-cli`, and links `sn` onto
+your `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/skylen15/sn-cli/main/install.sh | bash
+```
+
+Or install manually:
 
 ```bash
 git clone <this-repo-url>

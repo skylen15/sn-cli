@@ -1,6 +1,8 @@
 /** Pure GraphQL Engine search logic, ported from the browser tool's search-core.
  * Ticket 06 slice: Excerpts with context lines under a matched-priority budget. */
 
+import { Predicate, Schema } from "effect";
+
 export interface Line {
   lineNumber: number;
   content: string;
@@ -34,10 +36,14 @@ export const ARTIFACTS_PER_DOCUMENT = 10;
 const DEFAULT_MIN_WORD_LENGTH = 2;
 const TOKEN_PATTERN = /"([^"]*)"|(\S+)/g;
 
+function isJsonObject(value: Schema.Json | undefined): value is Schema.JsonObject {
+  return Predicate.isObject(value);
+}
+
 /** How a multi-word term becomes words: one phrase, every word, or any word. */
 export type MatchMode = "phrase" | "all" | "any";
 
-function normalisePositiveInteger(value: unknown, fallback: number): number {
+function normalisePositiveInteger(value: number | undefined, fallback: number): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     return fallback;
@@ -45,7 +51,7 @@ function normalisePositiveInteger(value: unknown, fallback: number): number {
   return Math.floor(number);
 }
 
-function normaliseMatchMode(value: unknown): MatchMode {
+function normaliseMatchMode(value: MatchMode | string | undefined): MatchMode {
   return value === "all" || value === "any" ? value : "phrase";
 }
 
@@ -60,12 +66,9 @@ export function tokenise(
   term: string,
   options?: { minWordLength?: number; matchMode?: MatchMode | string },
 ): string[] {
-  const minWordLength = normalisePositiveInteger(
-    options?.minWordLength,
-    DEFAULT_MIN_WORD_LENGTH,
-  );
+  const minWordLength = normalisePositiveInteger(options?.minWordLength, DEFAULT_MIN_WORD_LENGTH);
   const matchMode = normaliseMatchMode(options?.matchMode);
-  const source = typeof term === "string" ? term : "";
+  const source = term;
 
   if (matchMode === "phrase") {
     const phrase = unwrapQuotedPhrase(source.trim());
@@ -99,9 +102,7 @@ export function buildEncodedQuery(
 ): string {
   const matchMode = normaliseMatchMode(options?.matchMode);
   const includeActive = options?.includeActive === true;
-  const groups = words.map((word) =>
-    fields.map((field) => `${field}LIKE${word}`).join("^OR"),
-  );
+  const groups = words.map((word) => fields.map((field) => `${field}LIKE${word}`).join("^OR"));
   const joiner = matchMode === "any" ? "^NQ" : "^";
   if (!includeActive) {
     return groups.join(joiner);
@@ -175,9 +176,7 @@ export function buildGraphqlBatchQuery(
       fragments.push(fragment);
     }
   }
-  return fragments.length > 0
-    ? `query { GlideRecord_Query { ${fragments.join(" ")} } }`
-    : "";
+  return fragments.length > 0 ? `query { GlideRecord_Query { ${fragments.join(" ")} } }` : "";
 }
 
 /** Split items into fixed-size windows (last window may be shorter). */
@@ -190,31 +189,26 @@ export function chunk<T>(items: ReadonlyArray<T>, size: number): T[][] {
   return out;
 }
 
-function fieldValue(field: unknown): string {
+function fieldValue(field: Schema.Json | undefined): string {
   if (field === null || field === undefined) {
     return "";
   }
-  if (
-    typeof field === "string" ||
-    typeof field === "number" ||
-    typeof field === "boolean"
-  ) {
+  if (Predicate.isString(field) || Predicate.isNumber(field) || Predicate.isBoolean(field)) {
     return String(field);
   }
-  if (typeof field !== "object") {
+  if (!isJsonObject(field)) {
     return "";
   }
-  const obj = field as { value?: unknown; displayValue?: unknown };
-  if (obj.value !== undefined && obj.value !== null && obj.value !== "") {
-    return String(obj.value);
+  if (field.value !== undefined && field.value !== null && field.value !== "") {
+    return String(field.value);
   }
-  if (obj.displayValue !== undefined && obj.displayValue !== null) {
-    return String(obj.displayValue);
+  if (field.displayValue !== undefined && field.displayValue !== null) {
+    return String(field.displayValue);
   }
   return "";
 }
 
-function recordName(record: Record<string, unknown>): string {
+function recordName(record: Schema.JsonObject): string {
   return (
     fieldValue(record.sys_name) ||
     fieldValue(record.name) ||
@@ -227,35 +221,21 @@ function splitLines(text: string): string[] {
   return String(text).split(/\r\n|\r|\n/);
 }
 
-function matchingWordsInText(
-  text: string,
-  words: ReadonlyArray<string>,
-): string[] {
+function matchingWordsInText(text: string, words: ReadonlyArray<string>): string[] {
   const lower = text.toLowerCase();
-  return words.filter(
-    (word) => word && lower.includes(String(word).toLowerCase()),
-  );
+  return words.filter((word) => word && lower.includes(String(word).toLowerCase()));
 }
 
-function lineContainsWords(
-  line: string,
-  words: ReadonlyArray<string>,
-): boolean {
+function lineContainsWords(line: string, words: ReadonlyArray<string>): boolean {
   const lower = line.toLowerCase();
-  return words.some(
-    (word) => word && lower.includes(String(word).toLowerCase()),
-  );
+  return words.some((word) => word && lower.includes(String(word).toLowerCase()));
 }
 
 /** One context line either side of each Matched line; twenty lines per Field match. */
 const CONTEXT_RADIUS = 1;
 const EXCERPT_LINE_CAP = 20;
 
-function tryAddLineIndex(
-  included: Set<number>,
-  index: number,
-  lineCount: number,
-): boolean {
+function tryAddLineIndex(included: Set<number>, index: number, lineCount: number): boolean {
   if (index < 0 || index >= lineCount) {
     return false;
   }
@@ -347,28 +327,23 @@ export function processHits(
   table: string,
   fields: ReadonlyArray<string>,
   words: ReadonlyArray<string>,
-  tableData: unknown,
+  tableData: Schema.Json,
 ): Hit[] {
-  const searchWords = words.filter(
-    (word): word is string => typeof word === "string" && word.length > 0,
-  );
-  if (!searchWords.length || !tableData || typeof tableData !== "object") {
+  const searchWords = words.filter((word) => word.length > 0);
+  if (!searchWords.length || !isJsonObject(tableData)) {
     return [];
   }
 
-  const rows = Array.isArray((tableData as { _results?: unknown })._results)
-    ? (tableData as { _results: unknown[] })._results
-    : [];
+  const rows = Array.isArray(tableData._results) ? tableData._results : [];
 
   const hits: Hit[] = [];
   for (const record of rows) {
-    if (!record || typeof record !== "object") {
+    if (!isJsonObject(record)) {
       continue;
     }
-    const row = record as Record<string, unknown>;
     const fieldMatches: FieldMatch[] = [];
     for (const field of fields) {
-      const value = fieldValue(row[field]);
+      const value = fieldValue(record[field]);
       if (!value) {
         continue;
       }
@@ -391,9 +366,9 @@ export function processHits(
       continue;
     }
     hits.push({
-      sysId: fieldValue(row.sys_id),
-      name: recordName(row),
-      table: fieldValue(row.sys_class_name) || table,
+      sysId: fieldValue(record.sys_id),
+      name: recordName(record),
+      table: fieldValue(record.sys_class_name) || table,
       fieldMatches,
     });
   }
@@ -401,7 +376,7 @@ export function processHits(
 }
 
 /** Field types the GraphQL Engine searches by default (code-bearing). */
-const CODE_FIELD_TYPES: Readonly<Record<string, true>> = {
+const CODE_FIELD_TYPES = {
   script: true,
   script_plain: true,
   script_server: true,
@@ -419,7 +394,7 @@ const CODE_FIELD_TYPES: Readonly<Record<string, true>> = {
   translated_html: true,
   css: true,
   graphql_schema: true,
-};
+} as const;
 
 /** Encoded Query fragment that selects every code-bearing Dictionary row,
  * plus `active` so Artifact discovery can set hasActive. `^NQ` starts a fresh
@@ -432,9 +407,9 @@ export function codeFieldDictionaryQuery(): string {
 }
 
 /** Plain-text types offered but not selected for automatic search. */
-const PLAIN_TEXT_FIELD_TYPES: Readonly<Record<string, true>> = {
+const PLAIN_TEXT_FIELD_TYPES = {
   string: true,
-};
+} as const;
 
 export interface DictionaryField {
   element: string;
@@ -452,71 +427,63 @@ export interface DictionaryRead {
 }
 
 /** Read a Table API cell that may be a scalar or `{ value, display_value }`. */
-function dictionaryCell(value: unknown): string {
+function dictionaryCell(value: Schema.Json | undefined): string {
   if (value === null || value === undefined) {
     return "";
   }
-  if (typeof value === "object") {
-    // SAFETY: Table API display_value=all cells are objects with optional
-    // value / display_value / displayValue; we only read those keys.
-    const obj = value as {
-      value?: unknown;
-      display_value?: unknown;
-      displayValue?: unknown;
-    };
-    if (obj.value !== undefined && obj.value !== null && obj.value !== "") {
-      return String(obj.value);
+  if (Array.isArray(value)) {
+    return "";
+  }
+  if (isJsonObject(value)) {
+    if (value.value !== undefined && value.value !== null && value.value !== "") {
+      return String(value.value);
     }
     if (
-      obj.display_value !== undefined &&
-      obj.display_value !== null &&
-      obj.display_value !== ""
+      value.display_value !== undefined &&
+      value.display_value !== null &&
+      value.display_value !== ""
     ) {
-      return String(obj.display_value);
+      return String(value.display_value);
     }
     if (
-      obj.displayValue !== undefined &&
-      obj.displayValue !== null &&
-      obj.displayValue !== ""
+      value.displayValue !== undefined &&
+      value.displayValue !== null &&
+      value.displayValue !== ""
     ) {
-      return String(obj.displayValue);
+      return String(value.displayValue);
     }
     return "";
   }
   return String(value);
 }
 
+function payloadRows(payload: Schema.Json | undefined): ReadonlyArray<Schema.Json> {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  return isJsonObject(payload) && Array.isArray(payload.result) ? payload.result : [];
+}
+
 /** Classify a `sys_dictionary` Table API payload into code / plain-text fields.
  * Subject rows win over ancestors; `selected` means code-bearing. */
 export function readDictionary(
-  payload: unknown,
+  payload: Schema.Json | undefined,
   subjectTable: string,
 ): DictionaryRead {
-  // SAFETY: Table API list bodies are `{ result: Row[] }` or a bare array;
-  // we only read `.result` when present.
-  const rows =
-    payload &&
-    typeof payload === "object" &&
-    Array.isArray((payload as { result?: unknown }).result)
-      ? (payload as { result: unknown[] }).result
-      : Array.isArray(payload)
-        ? payload
-        : [];
-  const subject = typeof subjectTable === "string" ? subjectTable.trim() : "";
+  const rows = payloadRows(payload);
+  const subject = subjectTable.trim();
   let label = "";
   const fields: DictionaryField[] = [];
   let hasActive = false;
   const seen = new Set<string>();
-  const subjectRows: object[] = [];
-  const ancestorRows: object[] = [];
+  const subjectRows: Schema.JsonObject[] = [];
+  const ancestorRows: Schema.JsonObject[] = [];
 
   for (const row of rows) {
-    if (!row || typeof row !== "object") {
+    if (!isJsonObject(row)) {
       continue;
     }
-    // SAFETY: Dictionary rows are plain objects; name is read via dictionaryCell.
-    const tableName =
-      dictionaryCell((row as { name?: unknown }).name).trim() || subject;
+    const tableName = dictionaryCell(row.name).trim() || subject;
     if (subject && tableName === subject) {
       subjectRows.push(row);
     } else {
@@ -524,13 +491,11 @@ export function readDictionary(
     }
   }
 
-  const consumeRow = (row: object) => {
-    // SAFETY: Dictionary rows are plain objects; known keys only, via dictionaryCell.
-    const rec = row as Record<string, unknown>;
-    const element = dictionaryCell(rec.element).trim();
-    const type = dictionaryCell(rec.internal_type).trim();
-    const fieldLabel = dictionaryCell(rec.column_label).trim();
-    const declaredOn = dictionaryCell(rec.name).trim() || subject;
+  const consumeRow = (row: Schema.JsonObject) => {
+    const element = dictionaryCell(row.element).trim();
+    const type = dictionaryCell(row.internal_type).trim();
+    const fieldLabel = dictionaryCell(row.column_label).trim();
+    const declaredOn = dictionaryCell(row.name).trim() || subject;
 
     if (!element) {
       if (fieldLabel && (!subject || declaredOn === subject)) {
@@ -547,8 +512,8 @@ export function readDictionary(
       return;
     }
 
-    const selected = !!CODE_FIELD_TYPES[type];
-    const offered = selected || !!PLAIN_TEXT_FIELD_TYPES[type];
+    const selected = type in CODE_FIELD_TYPES;
+    const offered = selected || type in PLAIN_TEXT_FIELD_TYPES;
     if (!offered) {
       return;
     }
@@ -580,27 +545,17 @@ export function readDictionary(
 
 /** Every Artifact the Dictionary payload reports: Tables with code fields,
  * ordered by Table name. Plain-text types are ignored; `active` sets hasActive. */
-export function discoverArtifacts(payload: unknown): Artifact[] {
-  // SAFETY: Table API list bodies are `{ result: Row[] }` or a bare array.
-  const rows =
-    payload &&
-    typeof payload === "object" &&
-    Array.isArray((payload as { result?: unknown }).result)
-      ? (payload as { result: unknown[] }).result
-      : Array.isArray(payload)
-        ? payload
-        : [];
+export function discoverArtifacts(payload: Schema.Json | undefined): Artifact[] {
+  const rows = payloadRows(payload);
 
   const byTable = new Map<string, { fields: string[]; hasActive: boolean }>();
   for (const row of rows) {
-    if (!row || typeof row !== "object") {
+    if (!isJsonObject(row)) {
       continue;
     }
-    // SAFETY: Dictionary rows are plain objects; known keys only, via dictionaryCell.
-    const rec = row as Record<string, unknown>;
-    const table = dictionaryCell(rec.name).trim();
-    const element = dictionaryCell(rec.element).trim();
-    const type = dictionaryCell(rec.internal_type).trim();
+    const table = dictionaryCell(row.name).trim();
+    const element = dictionaryCell(row.element).trim();
+    const type = dictionaryCell(row.internal_type).trim();
     if (!table || !element) {
       continue;
     }
@@ -612,7 +567,7 @@ export function discoverArtifacts(payload: unknown): Artifact[] {
     if (element === "active") {
       entry.hasActive = true;
     }
-    if (!CODE_FIELD_TYPES[type]) {
+    if (!(type in CODE_FIELD_TYPES)) {
       continue;
     }
     if (!entry.fields.includes(element)) {
@@ -639,30 +594,24 @@ export interface QueryError {
 /** Map GraphQL `errors` into attributed Failure reasons. The seam is not taught
  * about GraphQL — the command reads this array itself (ADR 0012). */
 export function readQueryErrors(
-  payload: unknown,
+  payload: Schema.Json | undefined,
   tableNames: ReadonlyArray<string>,
 ): QueryError[] {
-  const errors =
-    payload && typeof payload === "object"
-      ? (payload as { errors?: unknown }).errors
-      : undefined;
+  const errors = isJsonObject(payload) ? payload.errors : undefined;
   if (!Array.isArray(errors)) {
     return [];
   }
   const searched = new Set(tableNames);
   const out: QueryError[] = [];
   for (const entry of errors) {
-    const raw =
-      entry && typeof entry === "object"
-        ? (entry as { message?: unknown; path?: unknown })
-        : undefined;
-    const trimmed = typeof raw?.message === "string" ? raw.message.trim() : "";
+    const raw = isJsonObject(entry) ? entry : undefined;
+    const trimmed = Predicate.isString(raw?.message) ? raw.message.trim() : "";
     const message = trimmed || "Unspecified GraphQL error";
     let tableName = "";
     const path = raw?.path;
     if (Array.isArray(path)) {
       for (const step of path) {
-        if (typeof step === "string" && searched.has(step)) {
+        if (Predicate.isString(step) && searched.has(step)) {
           tableName = step;
           break;
         }
@@ -676,31 +625,26 @@ export function readQueryErrors(
 /** True when GlideRecord_Query carries an object for this Artifact (empty
  * `_results` still counts — rows prove the Artifact was answered). */
 export function hasArtifactData(
-  glide: Record<string, unknown> | null | undefined,
+  glide: Schema.JsonObject | null | undefined,
   table: string,
 ): boolean {
   const value = glide?.[table];
-  return value !== null && typeof value === "object";
+  return isJsonObject(value);
 }
 
 /** GlideRecord_Query map from a GraphQL payload, or undefined when absent. */
-export function glideRecordQuery(
-  payload: unknown,
-): Record<string, unknown> | undefined {
-  const glide = (
-    payload as {
-      data?: { GlideRecord_Query?: unknown };
-    } | null
-  )?.data?.GlideRecord_Query;
-  return glide !== null && typeof glide === "object"
-    ? (glide as Record<string, unknown>)
-    : undefined;
+export function glideRecordQuery(payload: Schema.Json | undefined): Schema.JsonObject | undefined {
+  if (!isJsonObject(payload) || !isJsonObject(payload.data)) {
+    return undefined;
+  }
+  const glide = payload.data.GlideRecord_Query;
+  return isJsonObject(glide) ? glide : undefined;
 }
 
 /** A validation error rejects the whole document before any of it runs — no
  * Artifact in the batch has data. */
 export function batchWasRejected(
-  payload: unknown,
+  payload: Schema.Json | undefined,
   tableNames: ReadonlyArray<string>,
 ): boolean {
   if (tableNames.length === 0) {

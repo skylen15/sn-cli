@@ -6,16 +6,21 @@ import { fileURLToPath } from "node:url";
 const CLI = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 
 const spawn = (args: ReadonlyArray<string>) => {
-  const { stdout, stderr, status } = spawnSync(
-    process.execPath,
-    [CLI, ...args],
-    { encoding: "utf8" },
-  );
+  const { stdout, stderr, status } = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+  });
   return { stdout, stderr, code: status };
 };
 
 describe("rule group", () => {
-  it("lists install in group help and replaces cursor in root help", () => {
+  it("prints the group's help and exits 0 when invoked with no leaf", () => {
+    const { stdout, code } = spawn(["rule"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /USAGE/);
+    assert.match(stdout, /sn rule/);
+  });
+
+  it("lists install in group help and rule in root help", () => {
     const group = spawn(["rule", "--help"]);
     assert.equal(group.code, 0);
     assert.match(group.stdout, /\binstall\b/);
@@ -24,10 +29,5 @@ describe("rule group", () => {
     assert.equal(root.code, 0);
     assert.match(root.stdout, /\brule\b/);
     assert.doesNotMatch(root.stdout, /\bcursor\b/);
-  });
-
-  it("rejects the removed cursor command", () => {
-    const result = spawn(["cursor", "install-rule"]);
-    assert.notEqual(result.code, 0);
   });
 });

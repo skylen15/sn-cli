@@ -57,8 +57,7 @@ Preferred order:
 
 ```ts
 type Result<T, E extends Error> =
-  | { readonly _tag: "ok"; readonly value: T }
-  | { readonly _tag: "err"; readonly error: E };
+  { readonly _tag: "ok"; readonly value: T } | { readonly _tag: "err"; readonly error: E };
 ```
 
 Prefer:
@@ -331,9 +330,7 @@ Because TypeScript is structurally typed, this works well:
 
 ```ts
 type UsersForPasswordReset = {
-  findActiveByEmail(
-    email: EmailAddress,
-  ): Promise<Result<ActiveUser, UserLookupError>>;
+  findActiveByEmail(email: EmailAddress): Promise<Result<ActiveUser, UserLookupError>>;
 };
 
 export class PasswordReset {
@@ -627,10 +624,7 @@ For generics:
  * @param fn - The function applied to the success value.
  * @returns A result with the mapped success value, or the original error.
  */
-export function map<T, U, E>(
-  result: Result<T, E>,
-  fn: (value: T) => U,
-): Result<U, E>;
+export function map<T, U, E>(result: Result<T, E>, fn: (value: T) => U): Result<U, E>;
 ```
 
 Use `@throws` only for unrecoverable defects, framework-required behavior, or temporary `notYetImplemented` paths. Do not document expected typed errors as throws.
@@ -712,7 +706,7 @@ This draft intentionally stops before going deep on these areas. Cover them in a
 
 4. **Tooling details**
 
-- exact eslint rules
+- exact oxlint rules
 - exact tsconfig baseline
 - formatting/import rules
 - test runner conventions

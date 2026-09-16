@@ -2,17 +2,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { NodeServices } from "@effect/platform-node";
-import { Effect, Exit, Layer, Cause, Runtime } from "effect";
+import { Cause, Effect, Exit, Layer, Runtime, Schema } from "effect";
 import { Command } from "effect/unstable/cli";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
 import { sn } from "#src/cli.ts";
 import { emitCapture } from "#src/emit.ts";
-import { SnClient } from "#src/servicenow/client.ts";
-import {
-  SnRequestError,
-  isSnError,
-  snErrorJson,
-} from "#src/servicenow/errors.ts";
+import { makeTokenSourceLayer } from "#src/servicenow/auth.ts";
+import { SnClient, snClientLayer } from "#src/servicenow/client.ts";
+import { aliasConfirmLayer } from "#src/servicenow/confirm.ts";
+import { SnRequestError, isSnError, snErrorJson } from "#src/servicenow/errors.ts";
 
 type Seen = {
   path?: string;
@@ -22,7 +21,7 @@ type Seen = {
 type Request = (
   path: string,
   params?: Record<string, string>,
-) => Effect.Effect<unknown, SnRequestError>;
+) => Effect.Effect<Schema.Json, SnRequestError>;
 
 const run = (
   args: ReadonlyArray<string>,
@@ -30,13 +29,13 @@ const run = (
   writes: Array<unknown>,
 ) =>
   Effect.runPromiseExit(
-    Command.runWith(
-      sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))),
-      { version: "0.0.0-test", renderErrors: false },
-    )(args).pipe(Effect.provide(NodeServices.layer)),
+    Command.runWith(sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))), {
+      version: "0.0.0-test",
+      renderErrors: false,
+    })(args).pipe(Effect.provide(NodeServices.layer)),
   );
 
-const stub = (impl: Request): { layer: Layer.Layer<SnClient>; seen: Seen } => {
+const stub = (impl: Request) => {
   const seen: Seen = {};
   return {
     seen,
@@ -48,7 +47,6 @@ const stub = (impl: Request): { layer: Layer.Layer<SnClient>; seen: Seen } => {
           seen.params = params;
           return yield* impl(path, params);
         }),
-        token: () => Effect.die("SnClient.token unused in stub"),
       }),
     ),
   };
@@ -57,9 +55,7 @@ const stub = (impl: Request): { layer: Layer.Layer<SnClient>; seen: Seen } => {
 describe("table query", () => {
   it("returns the ServiceNow body and forwards table + params", async () => {
     const writes: unknown[] = [];
-    const { layer, seen } = stub(() =>
-      Effect.succeed({ result: [{ number: "INC001" }] }),
-    );
+    const { layer, seen } = stub(() => Effect.succeed({ result: [{ number: "INC001" }] }));
 
     const exit = await run(
       ["table", "query", "incident", "--limit", "5", "--query", "active=true"],
@@ -124,13 +120,7 @@ describe("table query", () => {
     const { layer, seen } = stub(() => Effect.succeed({ result: [] }));
 
     const exit = await run(
-      [
-        "table",
-        "query",
-        "incident",
-        "--sysparm",
-        "sysparm_suppress_pagination_header=true",
-      ],
+      ["table", "query", "incident", "--sysparm", "sysparm_suppress_pagination_header=true"],
       layer,
       writes,
     );
@@ -156,10 +146,10 @@ describe("table query", () => {
     );
 
     const exit = await Effect.runPromiseExit(
-      Command.runWith(
-        sn.pipe(Command.provide(Layer.merge(layer, emitCapture(writes)))),
-        { version: "0.0.0-test", renderErrors: false },
-      )(["table", "query", "bogus"]).pipe(
+      Command.runWith(sn.pipe(Command.provide(Layer.merge(layer, emitCapture(writes)))), {
+        version: "0.0.0-test",
+        renderErrors: false,
+      })(["table", "query", "bogus"]).pipe(
         Effect.tapError((error) =>
           isSnError(error)
             ? Effect.sync(() => {
@@ -178,7 +168,8 @@ describe("table query", () => {
         throw new Error("expected failure");
       },
       onFailure: (cause) => Cause.squash(cause),
-    }) as SnRequestError;
+    });
+    assert.ok(error instanceof SnRequestError);
     assert.equal(error._tag, "SnRequestError");
     assert.equal(error[Runtime.errorExitCode], 4);
     assert.deepEqual(stderr, [
@@ -189,5 +180,117 @@ describe("table query", () => {
         status: 400,
       }),
     ]);
+  });
+
+  it("queries formerly Sensitive Tables directly on an allowed instance", async () => {
+    const writes: unknown[] = [];
+    const { layer, seen } = stub(() => Effect.succeed({ result: [{ user_name: "admin" }] }));
+
+    const exit = await run(["table", "query", "sys_user"], layer, writes);
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.deepEqual(writes, [{ result: [{ user_name: "admin" }] }]);
+    assert.equal(seen.path, "/api/now/table/sys_user");
+  });
+
+  it("permits formerly Sensitive References in --fields without rejection or omission", async () => {
+    const writes: unknown[] = [];
+    const { layer, seen } = stub(() => Effect.succeed({ result: [] }));
+
+    const exit = await run(
+      ["table", "query", "incident", "--fields", "number,caller_id,caller_id.email"],
+      layer,
+      writes,
+    );
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.equal(seen.path, "/api/now/table/incident");
+    assert.equal(seen.params?.sysparm_fields, "number,caller_id,caller_id.email");
+  });
+
+  it("permits formerly Sensitive References in --query without rejection", async () => {
+    const writes: unknown[] = [];
+    const { layer, seen } = stub(() => Effect.succeed({ result: [] }));
+
+    const exit = await run(
+      ["table", "query", "incident", "--query", "caller_id=abc^caller_id.email=admin@example.com"],
+      layer,
+      writes,
+    );
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.equal(seen.path, "/api/now/table/incident");
+    assert.equal(seen.params?.sysparm_query, "caller_id=abc^caller_id.email=admin@example.com");
+  });
+
+  it("integration: non-TTY read-only query proceeds using default alias and announces target", async () => {
+    const writes: unknown[] = [];
+    const announcements: string[] = [];
+    const fetchImpl: typeof fetch = async (url) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/now/table/incident")) {
+        return new Response(JSON.stringify({ result: [{ number: "INC123" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const sdk = {
+      getStored: async (alias?: string) => ({
+        alias: alias ?? "dev-default",
+        isDefault: true,
+        creds: {
+          type: "oauth" as const,
+          instanceUrl: "https://dev12345.service-now.com",
+          access_token: "tok",
+          token_type: "Bearer",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+        },
+      }),
+      refreshAccessToken: async () => {
+        throw new Error("should not refresh");
+      },
+      storeCredentials: async () => undefined,
+      fetchCredentials: async () => new Map(),
+    };
+
+    const confirm = {
+      isTTY: false,
+      readLine: Effect.succeed(""),
+      writePrompt: (p: string) =>
+        Effect.sync(() => {
+          announcements.push(p);
+        }),
+    };
+
+    const fetchLayer = FetchHttpClient.layer.pipe(
+      Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchImpl)),
+    );
+    const clientLive = snClientLayer.pipe(
+      Layer.provide(fetchLayer),
+      Layer.provide(makeTokenSourceLayer(sdk)),
+    );
+
+    const exit = await Effect.runPromiseExit(
+      Command.runWith(
+        sn.pipe(
+          Command.provide(
+            Layer.mergeAll(clientLive, aliasConfirmLayer(confirm), emitCapture(writes)),
+          ),
+        ),
+        { version: "0.0.0-test", renderErrors: false },
+      )(["table", "query", "incident"]).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.deepEqual(writes, [{ result: [{ number: "INC123" }] }]);
+    assert.equal(announcements.length, 1);
+    assert.match(announcements[0] ?? "", /dev-default/);
+    assert.match(announcements[0] ?? "", /dev12345\.service-now\.com/);
   });
 });

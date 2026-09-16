@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // A throwaway CLI exercising every Effect 4.0 shape the later tickets build on
 // — nested subcommands, shared root flags, a service layer with a finalizer,
-// Config with a Redacted secret from .env, a tagged error carrying its own
-// exit code, and the stdout/stderr split. A version bump that breaks any of
-// them fails here instead of somewhere deep inside a ServiceNow command.
+// Config with a Redacted secret from the environment, a tagged error carrying
+// its own exit code, and the stdout/stderr split. A version bump that breaks
+// any of them fails here instead of somewhere deep inside a ServiceNow command.
 //
 // The runtime tail below duplicates src/cli.ts on purpose. Sharing it would
 // make the probe assert that the entrypoint agrees with itself; copying it
@@ -12,7 +12,6 @@ import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import {
   Cause,
   Config,
-  ConfigProvider,
   Console,
   Context,
   Effect,
@@ -107,12 +106,10 @@ probe.pipe(
   Command.provide(Greeter.layer),
   Command.run({ version: "0.0.0-probe" }),
   Effect.tapCause((cause) =>
-    Cause.hasInterruptsOnly(cause) ||
-    !Runtime.getErrorReported(Cause.squash(cause))
+    Cause.hasInterruptsOnly(cause) || !Runtime.getErrorReported(Cause.squash(cause))
       ? Effect.void
       : Console.error(Cause.pretty(cause)),
   ),
-  Effect.provide(ConfigProvider.layerAdd(ConfigProvider.fromDotEnv())),
   Effect.provide(NodeServices.layer),
   Effect.provideService(Logger.LogToStderr, true),
   (effect) => NodeRuntime.runMain(effect, { disableErrorReporting: true }),

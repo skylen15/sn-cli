@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0019
 ---
 
 # Command surface is four groups, broken at 2.0.0

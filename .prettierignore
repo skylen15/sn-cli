@@ -1,7 +1,0 @@
-pnpm-lock.yaml
-graphify-out
-
-# Vendored agent skills and scratch working notes are not this repo's source.
-.agents
-.cursor
-.scratch

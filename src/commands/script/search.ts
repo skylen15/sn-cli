@@ -1,15 +1,6 @@
-import { Effect, Option } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { sn } from "#src/root.ts";
-import { emitJson, emitText } from "#src/emit.ts";
-import { AliasFlag } from "#src/servicenow/auth.ts";
-import { SnClient } from "#src/servicenow/client.ts";
-import {
-  SnRequestError,
-  SnSearchIncompleteError,
-} from "#src/servicenow/errors.ts";
-import { inheritanceChain } from "#src/servicenow/inheritance.ts";
 import {
   ARTIFACTS_PER_DOCUMENT,
   batchWasRejected,
@@ -28,6 +19,12 @@ import {
   type Hit,
   type MatchMode,
 } from "#src/commands/script/search-core.ts";
+import { emitJson, emitText } from "#src/emit.ts";
+import { sn } from "#src/root.ts";
+import { withAuth } from "#src/servicenow/auth.ts";
+import { SnClient } from "#src/servicenow/client.ts";
+import { SnRequestError, SnSearchIncompleteError } from "#src/servicenow/errors.ts";
+import { inheritanceChain } from "#src/servicenow/inheritance.ts";
 
 interface ApiLineMatch {
   line?: number;
@@ -91,10 +88,7 @@ function asText(hits: Hit[]): string {
   if (hits.length === 0) {
     return "No results found.";
   }
-  const lines: string[] = [
-    `Found ${hits.length} hit${hits.length === 1 ? "" : "s"}:`,
-    "",
-  ];
+  const lines: string[] = [`Found ${hits.length} hit${hits.length === 1 ? "" : "s"}:`, ""];
   for (const hit of hits) {
     lines.push(`${hit.table} > ${hit.name} (${hit.sysId})`);
     for (const fm of hit.fieldMatches) {
@@ -102,9 +96,7 @@ function asText(hits: Hit[]): string {
       for (const lm of fm.lines) {
         // Matched lines use ':'; context lines use '-' (grep/ripgrep convention).
         const marker = lm.matched ? ":" : "-";
-        lines.push(
-          `    ${lm.lineNumber > 0 ? `L${lm.lineNumber}${marker} ` : ""}${lm.content}`,
-        );
+        lines.push(`    ${lm.lineNumber > 0 ? `L${lm.lineNumber}${marker} ` : ""}${lm.content}`);
       }
     }
     lines.push("");
@@ -123,10 +115,9 @@ const searchNative = Effect.fn("script.search.native")(function* (
   currentApp: Option.Option<string>,
   limit: Option.Option<number>,
 ) {
-  const params: Record<string, string> = {
-    term,
-    search_all_scopes: String(searchAllScopes),
-  };
+  const params: Record<string, string> = {};
+  params.term = term;
+  params.search_all_scopes = String(searchAllScopes);
   if (Option.isSome(currentApp)) {
     params.current_app = currentApp.value;
   }
@@ -134,11 +125,8 @@ const searchNative = Effect.fn("script.search.native")(function* (
     params.limit = String(limit.value);
   }
 
-  const { alias } = yield* sn;
   const client = yield* SnClient;
-  const data = yield* client
-    .request("/api/sn_codesearch/code_search/search", params)
-    .pipe(Effect.provideService(AliasFlag, alias));
+  const data = yield* client.request("/api/sn_codesearch/code_search/search", params);
 
   // The API returns an array of groups, but collapses to a single object
   // when the result set is narrow — normalise to an array before mapping.
@@ -146,38 +134,27 @@ const searchNative = Effect.fn("script.search.native")(function* (
   const result = (data as { result?: unknown } | null)?.result;
   // SAFETY: after normalisation, each element is a group with optional
   // hits/matches; toHits defaults missing fields.
-  const groups = (
-    Array.isArray(result) ? result : result ? [result] : []
-  ) as ApiRecordTypeResult[];
+  const groups = (Array.isArray(result) ? result : result ? [result] : []) as ApiRecordTypeResult[];
   return toHits(groups);
 });
 
 /** Artifact for a named Table: Dictionary classification over the inheritance
  * chain (ADR 0010). Plain-text types are offered but not selected. */
-const resolveArtifact = Effect.fn("script.search.resolveArtifact")(function* (
-  table: string,
-) {
-  const { alias } = yield* sn;
+const resolveArtifact = Effect.fn("script.search.resolveArtifact")(function* (table: string) {
   const client = yield* SnClient;
-  const withAlias = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    effect.pipe(Effect.provideService(AliasFlag, alias));
 
-  const chain = yield* withAlias(inheritanceChain(table));
+  const chain = yield* inheritanceChain(table);
   // ponytail: one Dictionary page per run (limit 1000), matching the browser
   // tool. Ceiling: a table whose chain exceeds 1000 dictionary rows truncates
   // silently. Upgrade path: paginate if a real Artifact ever hits the cap.
-  const payload = yield* withAlias(
-    client.request("/api/now/table/sys_dictionary", {
-      sysparm_query: `nameIN${chain.join(",")}^ORDERBYelement`,
-      sysparm_fields: "name,element,column_label,internal_type",
-      sysparm_display_value: "all",
-      sysparm_limit: "1000",
-    }),
-  );
+  const payload = yield* client.request("/api/now/table/sys_dictionary", {
+    sysparm_query: `nameIN${chain.join(",")}^ORDERBYelement`,
+    sysparm_fields: "name,element,column_label,internal_type",
+    sysparm_display_value: "all",
+    sysparm_limit: "1000",
+  });
   const read = readDictionary(payload, table);
-  const fields = read.fields
-    .filter((field) => field.selected)
-    .map((field) => field.element);
+  const fields = read.fields.filter((field) => field.selected).map((field) => field.element);
   return {
     table,
     fields,
@@ -187,24 +164,19 @@ const resolveArtifact = Effect.fn("script.search.resolveArtifact")(function* (
 });
 
 /** Every Artifact on the instance: one Dictionary read of code-bearing rows. */
-const discoverAllArtifacts = Effect.fn("script.search.discoverAllArtifacts")(
-  function* () {
-    const { alias } = yield* sn;
-    const client = yield* SnClient;
-    // ponytail: one Dictionary page (limit 10000). Ceiling: an instance with
-    // more code-bearing dictionary rows truncates silently. Upgrade path:
-    // paginate when measurement shows a real instance hitting the cap.
-    const payload = yield* client
-      .request("/api/now/table/sys_dictionary", {
-        sysparm_query: codeFieldDictionaryQuery(),
-        sysparm_fields: "name,element,column_label,internal_type",
-        sysparm_display_value: "all",
-        sysparm_limit: "10000",
-      })
-      .pipe(Effect.provideService(AliasFlag, alias));
-    return discoverArtifacts(payload);
-  },
-);
+const discoverAllArtifacts = Effect.fn("script.search.discoverAllArtifacts")(function* () {
+  const client = yield* SnClient;
+  // ponytail: one Dictionary page (limit 10000). Ceiling: an instance with
+  // more code-bearing dictionary rows truncates silently. Upgrade path:
+  // paginate when measurement shows a real instance hitting the cap.
+  const payload = yield* client.request("/api/now/table/sys_dictionary", {
+    sysparm_query: codeFieldDictionaryQuery(),
+    sysparm_fields: "name,element,column_label,internal_type",
+    sysparm_display_value: "all",
+    sysparm_limit: "10000",
+  });
+  return discoverArtifacts(payload);
+});
 
 type FailureReason = { table: string; message: string };
 
@@ -223,7 +195,7 @@ type BatchOutcome = BatchAccount | { _tag: "rejected" };
 function accountGraphqlBatch(
   artifacts: ReadonlyArray<Artifact>,
   words: ReadonlyArray<string>,
-  payload: unknown,
+  payload: Schema.Json,
 ): BatchOutcome {
   const tables = artifacts.map((artifact) => artifact.table);
   if (batchWasRejected(payload, tables) && artifacts.length > 1) {
@@ -236,23 +208,14 @@ function accountGraphqlBatch(
     message: error.message,
   }));
   const explained = new Set(
-    queryErrors
-      .map((error) => error.tableName)
-      .filter((table) => table.length > 0),
+    queryErrors.map((error) => error.tableName).filter((table) => table.length > 0),
   );
   const glide = glideRecordQuery(payload) ?? {};
   const hits: Hit[] = [];
   const unsearched: string[] = [];
   for (const artifact of artifacts) {
     if (hasArtifactData(glide, artifact.table)) {
-      hits.push(
-        ...processHits(
-          artifact.table,
-          artifact.fields,
-          words,
-          glide[artifact.table],
-        ),
-      );
+      hits.push(...processHits(artifact.table, artifact.fields, words, glide[artifact.table]));
     } else if (!explained.has(artifact.table)) {
       unsearched.push(artifact.table);
     }
@@ -286,38 +249,51 @@ const searchGraphqlBatch = Effect.fn("script.search.graphql.batch")(function* (
       });
     }
     return {
-      _tag: "accounted" as const,
-      hits: [] as Hit[],
-      reasons: [] as FailureReason[],
+      _tag: "accounted",
+      hits: [],
+      reasons: [],
       unsearched: artifacts.map((artifact) => artifact.table),
-    };
+    } satisfies BatchAccount;
   }
 
-  const { alias } = yield* sn;
   const client = yield* SnClient;
-  const data = yield* client
+  const payload = yield* client
     .request("/api/now/graphql", undefined, {
       method: "POST",
       body: { query },
     })
     .pipe(
-      Effect.provideService(AliasFlag, alias),
-      // ADR 0011: GraphQL fails loudly; name the way round, never fall back.
+      // ADR 0011: the Engine is chosen, not detected — GraphQL fails loudly
+      // and names the other Engine rather than silently falling back.
       // ponytail: rebuild SnRequestError field-by-field. Ceiling: a new optional
       // key on SnRequestError is dropped until this site is updated.
       Effect.mapError((error) =>
-        error._tag === "SnRequestError"
-          ? new SnRequestError({
-              message: `${error.message} If GraphQL is unavailable on this instance, retry with --engine native.`,
-              ...(error.detail !== undefined ? { detail: error.detail } : {}),
-              ...(error.status !== undefined ? { status: error.status } : {}),
-            })
-          : error,
+        error._tag === "SnRequestError" ? explainGraphqlOnly(error) : error,
       ),
     );
 
-  return accountGraphqlBatch(artifacts, words, data);
+  return accountGraphqlBatch(artifacts, words, payload);
 });
+
+function explainGraphqlOnly(error: SnRequestError): SnRequestError {
+  const message = `${error.message} If GraphQL is unavailable on this instance, retry with --engine native.`;
+  const hint = "Retry with `--engine native` if GraphQL is unavailable on this instance.";
+  if (error.detail !== undefined && error.status !== undefined) {
+    return new SnRequestError({
+      message,
+      hint,
+      detail: error.detail,
+      status: error.status,
+    });
+  }
+  if (error.detail !== undefined) {
+    return new SnRequestError({ message, hint, detail: error.detail });
+  }
+  if (error.status !== undefined) {
+    return new SnRequestError({ message, hint, status: error.status });
+  }
+  return new SnRequestError({ message, hint });
+}
 
 type GraphqlSearch = {
   hits: Hit[];
@@ -336,9 +312,9 @@ const searchGraphql = Effect.fn("script.search.graphql")(function* (
   const words = tokenise(term, { matchMode });
   if (words.length === 0 || artifacts.length === 0) {
     return {
-      hits: [] as Hit[],
-      reasons: [] as FailureReason[],
-      unsearched: [] as string[],
+      hits: [],
+      reasons: [],
+      unsearched: [],
       total: artifacts.length,
     } satisfies GraphqlSearch;
   }
@@ -352,20 +328,18 @@ const searchGraphql = Effect.fn("script.search.graphql")(function* (
   const runBatch = (batch: ReadonlyArray<Artifact>) =>
     searchGraphqlBatch(words, batch, limit, options);
 
-  const batchOutcomes = yield* Effect.forEach(batches, runBatch, {
-    concurrency: GRAPHQL_DOCUMENT_CONCURRENCY,
-  });
+  const batchRuns = yield* Effect.forEach(
+    batches,
+    (batch) => runBatch(batch).pipe(Effect.map((outcome) => ({ batch, outcome }))),
+    { concurrency: GRAPHQL_DOCUMENT_CONCURRENCY },
+  );
 
-  for (let i = 0; i < batches.length; i += 1) {
-    const batch = batches[i]!;
-    const outcome = batchOutcomes[i]!;
+  for (const { batch, outcome } of batchRuns) {
     if (outcome._tag === "rejected") {
       // One Artifact at a time so the Artifact at fault is named on its own.
-      const alone = yield* Effect.forEach(
-        batch,
-        (artifact) => runBatch([artifact]),
-        { concurrency: 1 },
-      );
+      const alone = yield* Effect.forEach(batch, (artifact) => runBatch([artifact]), {
+        concurrency: 1,
+      });
       for (const one of alone) {
         // Solo batches never reject (only length > 1 can); they account.
         if (one._tag === "rejected") {
@@ -442,9 +416,7 @@ const search = Command.make(
       ),
     ),
     limit: Flag.optional(
-      Flag.integer("limit").pipe(
-        Flag.withDescription("Maximum number of results to return"),
-      ),
+      Flag.integer("limit").pipe(Flag.withDescription("Maximum number of results to return")),
     ),
     format: Flag.choice("format", ["json", "text"]).pipe(
       Flag.withDefault("json" as const),
@@ -465,94 +437,102 @@ const search = Command.make(
     limit,
     format,
   }) {
-    let hits: Hit[];
-    let incomplete:
-      | {
-          failed: number;
-          total: number;
-          reasons: FailureReason[];
-          unsearched: string[];
-        }
-      | undefined;
-    if (engine === "graphql") {
-      let artifacts: Artifact[];
-      if (Option.isSome(table)) {
-        const resolved = yield* resolveArtifact(table.value);
-        if (Option.isSome(field)) {
-          artifacts = [
-            {
-              table: resolved.table,
-              fields: [field.value],
-              hasActive: resolved.hasActive,
-            },
-          ];
-        } else if (resolved.fields.length === 0) {
-          return yield* new SnRequestError({
-            message: resolved.found
-              ? `Table ${JSON.stringify(table.value)} has no code fields in the Dictionary`
-              : `Table ${JSON.stringify(table.value)} was not found in the Dictionary`,
-          });
+    const { alias, yes } = yield* sn;
+    const withAuthContext = withAuth({ alias, yes });
+
+    const runSearch = Effect.gen(function* () {
+      let hits: Hit[];
+      let incomplete:
+        | {
+            failed: number;
+            total: number;
+            reasons: FailureReason[];
+            unsearched: string[];
+          }
+        | undefined;
+      if (engine === "graphql") {
+        let artifacts: Artifact[];
+        if (Option.isSome(table)) {
+          const resolved = yield* resolveArtifact(table.value);
+          if (Option.isSome(field)) {
+            artifacts = [
+              {
+                table: resolved.table,
+                fields: [field.value],
+                hasActive: resolved.hasActive,
+              },
+            ];
+          } else if (resolved.fields.length === 0) {
+            return yield* new SnRequestError({
+              message: resolved.found
+                ? `Table ${JSON.stringify(table.value)} has no code fields in the Dictionary`
+                : `Table ${JSON.stringify(table.value)} was not found in the Dictionary`,
+            });
+          } else {
+            artifacts = [
+              {
+                table: resolved.table,
+                fields: resolved.fields,
+                hasActive: resolved.hasActive,
+              },
+            ];
+          }
         } else {
-          artifacts = [
-            {
-              table: resolved.table,
-              fields: resolved.fields,
-              hasActive: resolved.hasActive,
-            },
-          ];
+          artifacts = yield* discoverAllArtifacts();
+          if (Option.isSome(field)) {
+            const named = field.value;
+            artifacts = artifacts
+              .filter((artifact) => artifact.fields.includes(named))
+              .map((artifact) => ({
+                table: artifact.table,
+                fields: [named],
+                hasActive: artifact.hasActive,
+              }));
+          }
+        }
+        const outcome = yield* searchGraphql(
+          term,
+          artifacts,
+          Option.isSome(limit) ? limit.value : DEFAULT_LIMIT,
+          matchMode,
+          !includeInactive,
+        );
+        hits = outcome.hits;
+        if (outcome.reasons.length > 0 || outcome.unsearched.length > 0) {
+          incomplete = {
+            failed: outcome.reasons.length,
+            total: outcome.total,
+            reasons: outcome.reasons,
+            unsearched: outcome.unsearched,
+          };
         }
       } else {
-        artifacts = yield* discoverAllArtifacts();
-        if (Option.isSome(field)) {
-          const named = field.value;
-          artifacts = artifacts
-            .filter((artifact) => artifact.fields.includes(named))
-            .map((artifact) => ({
-              table: artifact.table,
-              fields: [named],
-              hasActive: artifact.hasActive,
-            }));
-        }
+        hits = yield* searchNative(term, searchAllScopes, currentApp, limit);
       }
-      const outcome = yield* searchGraphql(
-        term,
-        artifacts,
-        Option.isSome(limit) ? limit.value : DEFAULT_LIMIT,
-        matchMode,
-        !includeInactive,
-      );
-      hits = outcome.hits;
-      if (outcome.reasons.length > 0 || outcome.unsearched.length > 0) {
-        incomplete = {
-          failed: outcome.reasons.length,
-          total: outcome.total,
-          reasons: outcome.reasons,
-          unsearched: outcome.unsearched,
-        };
+
+      if (format === "text") {
+        yield* emitText(asText(hits));
+      } else {
+        yield* emitJson(hits);
       }
-    } else {
-      hits = yield* searchNative(term, searchAllScopes, currentApp, limit);
-    }
 
-    if (format === "text") {
-      yield* emitText(asText(hits));
-    } else {
-      yield* emitJson(hits);
-    }
+      if (incomplete) {
+        const { failed, total, reasons, unsearched } = incomplete;
+        return yield* new SnSearchIncompleteError({
+          message:
+            failed > 0
+              ? `${failed} search failure${failed === 1 ? "" : "s"} across ${total} artifacts`
+              : `${unsearched.length} of ${total} artifacts unsearched`,
+          hint: "Inspect `reasons` and `unsearched`; keep the Hits already written to stdout.",
+          failed,
+          total,
+          reasons,
+          unsearched,
+        });
+      }
+    });
 
-    if (incomplete) {
-      const { failed, total, reasons, unsearched } = incomplete;
-      return yield* new SnSearchIncompleteError({
-        message:
-          failed > 0
-            ? `${failed} search failure${failed === 1 ? "" : "s"} across ${total} artifacts`
-            : `${unsearched.length} of ${total} artifacts unsearched`,
-        failed,
-        total,
-        reasons,
-        unsearched,
-      });
-    }
+    yield* withAuthContext(runSearch);
   }),
 ).pipe(
   Command.withDescription(

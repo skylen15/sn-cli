@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Redacted } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Redacted, Schema } from "effect";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { TokenSource } from "#src/servicenow/auth.ts";
 import { SnClient, snClientLayer, type Token } from "#src/servicenow/client.ts";
-import { SnAuthError } from "#src/servicenow/errors.ts";
+import { SnAuthError, SnRequestError } from "#src/servicenow/errors.ts";
 
-const ok = (body: unknown) =>
+const ok = (body: Schema.Json) =>
   new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
-const fail = (status: number, body: unknown = {}) =>
+const fail = (status: number, body: Schema.Json = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
@@ -48,9 +48,7 @@ const tokenSource = (
 };
 
 const fetchLayer = (impl: typeof fetch): Layer.Layer<HttpClient.HttpClient> =>
-  FetchHttpClient.layer.pipe(
-    Layer.provide(Layer.succeed(FetchHttpClient.Fetch, impl)),
-  );
+  FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, impl)));
 
 const run = <A, E>(
   tokens: ReadonlyArray<Token>,
@@ -65,14 +63,19 @@ const run = <A, E>(
     Effect.runPromiseExit,
   );
 
+interface SeenRequest {
+  url?: string;
+  auth?: string | null;
+}
+
 describe("SnClient auth seam", () => {
   it("sends bearer token and returns the parsed body", async () => {
-    const seen: { url?: string; auth?: string | null } = {};
-    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    const seen: SeenRequest = {};
+    const fetchImpl: typeof fetch = async (url, init) => {
       seen.url = String(url);
       seen.auth = new Headers(init?.headers).get("authorization");
       return ok({ result: [{ number: "INC001" }] });
-    }) as unknown as typeof fetch;
+    };
 
     const exit = await run(
       [tok("tok1")],
@@ -87,20 +90,17 @@ describe("SnClient auth seam", () => {
 
     assert.ok(Exit.isSuccess(exit));
     assert.deepEqual(exit.value, { result: [{ number: "INC001" }] });
-    assert.equal(
-      seen.url,
-      "https://x.service-now.com/api/now/table/incident?sysparm_limit=1",
-    );
+    assert.equal(seen.url, "https://x.service-now.com/api/now/table/incident?sysparm_limit=1");
     assert.equal(seen.auth, "Bearer tok1");
   });
 
   it("retries once on 401 when the token source returns a different token", async () => {
     const used: string[] = [];
-    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    const fetchImpl: typeof fetch = async (_url, init) => {
       const auth = new Headers(init?.headers).get("authorization") ?? "";
       used.push(auth);
       return auth === "Bearer fresh" ? ok({ result: [] }) : fail(401);
-    }) as unknown as typeof fetch;
+    };
 
     const calls = { n: 0 };
     const exit = await run(
@@ -120,7 +120,7 @@ describe("SnClient auth seam", () => {
   });
 
   it("fails immediately when a 401 refresh returns the same token", async () => {
-    const fetchImpl = (async () => fail(401)) as unknown as typeof fetch;
+    const fetchImpl: typeof fetch = async () => fail(401);
     const calls = { n: 0 };
 
     const exit = await run(
@@ -142,7 +142,49 @@ describe("SnClient auth seam", () => {
     });
     assert.ok(error instanceof SnAuthError);
     assert.match(error.message, /probably revoked/i);
+    assert.match(error.message, /sn auth remove/);
+    assert.equal(
+      error.hint,
+      "Run `sn auth remove <alias>`, then `sn auth add <https-origin> --alias <alias>`.",
+    );
     assert.equal(calls.n, 2, "initial token + one refresh attempt");
+  });
+
+  it("keeps a valid error message when detail is null", async () => {
+    const exit = await run(
+      [tok("tok1")],
+      async () => fail(403, { error: { message: "Access denied", detail: null } }),
+      Effect.gen(function* () {
+        const client = yield* SnClient;
+        return yield* client.request("/api/now/table/incident");
+      }),
+    );
+
+    assert.ok(Exit.isFailure(exit));
+    const error = Cause.squash(exit.cause);
+    assert.ok(error instanceof SnRequestError);
+    assert.equal(error.message, "Access denied");
+    assert.equal(error.detail, undefined);
+    assert.equal(error.status, 403);
+    assert.equal(error.hint, undefined);
+  });
+
+  it("keeps a valid error detail when message is malformed", async () => {
+    const exit = await run(
+      [tok("tok1")],
+      async () => fail(500, { error: { message: 42, detail: "Specific failure" } }),
+      Effect.gen(function* () {
+        const client = yield* SnClient;
+        return yield* client.request("/api/now/table/incident");
+      }),
+    );
+
+    assert.ok(Exit.isFailure(exit));
+    const error = Cause.squash(exit.cause);
+    assert.ok(error instanceof SnRequestError);
+    assert.equal(error.message, "Specific failure");
+    assert.equal(error.detail, "Specific failure");
+    assert.equal(error.status, 500);
   });
 
   it("collapses concurrent missing-token callers into one refresh", async () => {
@@ -163,8 +205,7 @@ describe("SnClient auth seam", () => {
           }),
         );
 
-        const fetchImpl = (async () =>
-          ok({ result: [] })) as unknown as typeof fetch;
+        const fetchImpl: typeof fetch = async () => ok({ result: [] });
 
         const body = Effect.gen(function* () {
           const client = yield* SnClient;

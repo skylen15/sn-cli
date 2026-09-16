@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0018
 ---
 
 # Two auth modes, selected by the nearest `.env`

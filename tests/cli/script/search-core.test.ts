@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { Schema } from "effect";
+
 import {
   ARTIFACTS_PER_DOCUMENT,
   batchWasRejected,
@@ -37,7 +39,7 @@ const CODE_FIELD_TYPES = [
   "graphql_schema",
 ] as const;
 
-const dictionaryPayload = (rows: unknown[]) => ({ result: rows });
+const dictionaryPayload = (rows: Schema.Json[]) => ({ result: rows });
 
 describe("search-core tokenise", () => {
   it("returns a multi-word term as one phrase by default", () => {
@@ -64,33 +66,26 @@ describe("search-core tokenise", () => {
   it("keeps table: and field: tokens as literal search text", () => {
     // sn divergence from the browser tool: filters are flags, not term syntax
     // (spec Term and matching / user story 16).
-    assert.deepEqual(tokenise("table:sys_script needle"), [
-      "table:sys_script needle",
+    assert.deepEqual(tokenise("table:sys_script needle"), ["table:sys_script needle"]);
+    assert.deepEqual(tokenise("table:sys_script needle", { matchMode: "all" }), [
+      "table:sys_script",
+      "needle",
     ]);
-    assert.deepEqual(
-      tokenise("table:sys_script needle", { matchMode: "all" }),
-      ["table:sys_script", "needle"],
-    );
   });
 
   it("treats unknown match modes as phrase", () => {
-    assert.deepEqual(tokenise("alpha beta", { matchMode: "other" }), [
-      "alpha beta",
-    ]);
+    assert.deepEqual(tokenise("alpha beta", { matchMode: "other" }), ["alpha beta"]);
   });
 
   it("splits on whitespace in all mode and keeps quoted phrases together", () => {
-    assert.deepEqual(
-      tokenise('a "two words" xyz', { matchMode: "all", minWordLength: 3 }),
-      ["two words", "xyz"],
-    );
+    assert.deepEqual(tokenise('a "two words" xyz', { matchMode: "all", minWordLength: 3 }), [
+      "two words",
+      "xyz",
+    ]);
   });
 
   it("splits the same way in any mode", () => {
-    assert.deepEqual(tokenise("alpha beta", { matchMode: "any" }), [
-      "alpha",
-      "beta",
-    ]);
+    assert.deepEqual(tokenise("alpha beta", { matchMode: "any" }), ["alpha", "beta"]);
   });
 });
 
@@ -163,30 +158,27 @@ describe("search-core processHits", () => {
       ],
     };
 
-    assert.deepEqual(
-      processHits("sys_script", ["script"], ["needle"], tableData),
-      [
-        {
-          sysId: "abc123",
-          name: "My BR",
-          table: "sys_script",
-          fieldMatches: [
-            {
-              field: "script",
-              matchedLineCount: 1,
-              omittedMatchedLines: 0,
-              lines: [
-                {
-                  lineNumber: 1,
-                  content: 'gs.info("needle here");',
-                  matched: true,
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    );
+    assert.deepEqual(processHits("sys_script", ["script"], ["needle"], tableData), [
+      {
+        sysId: "abc123",
+        name: "My BR",
+        table: "sys_script",
+        fieldMatches: [
+          {
+            field: "script",
+            matchedLineCount: 1,
+            omittedMatchedLines: 0,
+            lines: [
+              {
+                lineNumber: 1,
+                content: 'gs.info("needle here");',
+                matched: true,
+              },
+            ],
+          },
+        ],
+      },
+    ]);
   });
 
   it("collapses two matching fields on one record into one hit", () => {
@@ -202,42 +194,39 @@ describe("search-core processHits", () => {
       ],
     };
 
-    assert.deepEqual(
-      processHits("sys_script", ["script", "condition"], ["needle"], tableData),
-      [
-        {
-          sysId: "rec1",
-          name: "Shared",
-          table: "sys_script",
-          fieldMatches: [
-            {
-              field: "script",
-              matchedLineCount: 1,
-              omittedMatchedLines: 0,
-              lines: [
-                {
-                  lineNumber: 1,
-                  content: "var needle = 1;",
-                  matched: true,
-                },
-              ],
-            },
-            {
-              field: "condition",
-              matchedLineCount: 1,
-              omittedMatchedLines: 0,
-              lines: [
-                {
-                  lineNumber: 1,
-                  content: "needle == 1",
-                  matched: true,
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    );
+    assert.deepEqual(processHits("sys_script", ["script", "condition"], ["needle"], tableData), [
+      {
+        sysId: "rec1",
+        name: "Shared",
+        table: "sys_script",
+        fieldMatches: [
+          {
+            field: "script",
+            matchedLineCount: 1,
+            omittedMatchedLines: 0,
+            lines: [
+              {
+                lineNumber: 1,
+                content: "var needle = 1;",
+                matched: true,
+              },
+            ],
+          },
+          {
+            field: "condition",
+            matchedLineCount: 1,
+            omittedMatchedLines: 0,
+            lines: [
+              {
+                lineNumber: 1,
+                content: "needle == 1",
+                matched: true,
+              },
+            ],
+          },
+        ],
+      },
+    ]);
   });
 
   it("matches words case-insensitively without changing line content", () => {
@@ -252,30 +241,27 @@ describe("search-core processHits", () => {
       ],
     };
 
-    assert.deepEqual(
-      processHits("sys_script", ["script"], ["needle"], tableData),
-      [
-        {
-          sysId: "case1",
-          name: "Case",
-          table: "sys_script",
-          fieldMatches: [
-            {
-              field: "script",
-              matchedLineCount: 1,
-              omittedMatchedLines: 0,
-              lines: [
-                {
-                  lineNumber: 1,
-                  content: "Call NeEdLeNow();",
-                  matched: true,
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    );
+    assert.deepEqual(processHits("sys_script", ["script"], ["needle"], tableData), [
+      {
+        sysId: "case1",
+        name: "Case",
+        table: "sys_script",
+        fieldMatches: [
+          {
+            field: "script",
+            matchedLineCount: 1,
+            omittedMatchedLines: 0,
+            lines: [
+              {
+                lineNumber: 1,
+                content: "Call NeEdLeNow();",
+                matched: true,
+              },
+            ],
+          },
+        ],
+      },
+    ]);
   });
 
   it("numbers CRLF and lone-CR line endings correctly", () => {
@@ -317,22 +303,14 @@ describe("search-core processHits", () => {
           sys_id: { value: "ui1" },
           sys_name: { value: "UI" },
           script: {
-            value: [
-              "before",
-              "alpha here",
-              "middle",
-              "between",
-              "beta there",
-              "after",
-            ].join("\n"),
+            value: ["before", "alpha here", "middle", "between", "beta there", "after"].join("\n"),
           },
         },
       ],
     };
 
     assert.deepEqual(
-      processHits("sys_ui_script", ["script"], ["alpha", "beta"], tableData)[0]
-        ?.fieldMatches[0],
+      processHits("sys_ui_script", ["script"], ["alpha", "beta"], tableData)[0]?.fieldMatches[0],
       {
         field: "script",
         matchedLineCount: 2,
@@ -363,8 +341,7 @@ describe("search-core processHits", () => {
     };
 
     assert.deepEqual(
-      processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]
-        ?.fieldMatches[0]?.lines,
+      processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]?.fieldMatches[0]?.lines,
       [
         { lineNumber: 1, content: "keep", matched: false },
         { lineNumber: 2, content: "needle one", matched: true },
@@ -386,8 +363,7 @@ describe("search-core processHits", () => {
     };
 
     assert.deepEqual(
-      processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]
-        ?.fieldMatches[0]?.lines,
+      processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]?.fieldMatches[0]?.lines,
       [
         { lineNumber: 1, content: "needle top", matched: true },
         { lineNumber: 2, content: "middle", matched: false },
@@ -411,12 +387,8 @@ describe("search-core processHits", () => {
       ],
     };
 
-    const fieldMatch = processHits(
-      "sys_ui_script",
-      ["script"],
-      ["needle"],
-      tableData,
-    )[0]?.fieldMatches[0];
+    const fieldMatch = processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]
+      ?.fieldMatches[0];
 
     assert.equal(fieldMatch?.matchedLineCount, 25);
     assert.equal(fieldMatch?.omittedMatchedLines, 5);
@@ -431,9 +403,7 @@ describe("search-core processHits", () => {
     // (12 matched → 7 shown, 5 omitted). We keep every matched line first.
     const lines: string[] = [];
     for (let index = 1; index <= 60; index += 1) {
-      lines.push(
-        index % 5 === 0 ? "needle line " + index : "plain line " + index,
-      );
+      lines.push(index % 5 === 0 ? "needle line " + index : "plain line " + index);
     }
     const tableData = {
       _results: [
@@ -445,12 +415,8 @@ describe("search-core processHits", () => {
       ],
     };
 
-    const fieldMatch = processHits(
-      "sys_ui_script",
-      ["script"],
-      ["needle"],
-      tableData,
-    )[0]?.fieldMatches[0];
+    const fieldMatch = processHits("sys_ui_script", ["script"], ["needle"], tableData)[0]
+      ?.fieldMatches[0];
 
     assert.equal(fieldMatch?.matchedLineCount, 12);
     assert.equal(fieldMatch?.omittedMatchedLines, 0);
@@ -458,23 +424,14 @@ describe("search-core processHits", () => {
     assert.equal(fieldMatch?.lines.filter((line) => line.matched).length, 12);
     assert.deepEqual(
       fieldMatch?.lines.map((line) => line.lineNumber),
-      [
-        4, 5, 6, 9, 10, 11, 14, 15, 16, 19, 20, 21, 25, 30, 35, 40, 45, 50, 55,
-        60,
-      ],
+      [4, 5, 6, 9, 10, 11, 14, 15, 16, 19, 20, 21, 25, 30, 35, 40, 45, 50, 55, 60],
     );
   });
 
   it("skips empty responses and fields whose value does not contain the term", () => {
-    assert.deepEqual(
-      processHits("sys_script", ["script"], ["needle"], null),
-      [],
-    );
+    assert.deepEqual(processHits("sys_script", ["script"], ["needle"], null), []);
     assert.deepEqual(processHits("sys_script", ["script"], ["needle"], {}), []);
-    assert.deepEqual(
-      processHits("sys_script", ["script"], ["needle"], { _results: [] }),
-      [],
-    );
+    assert.deepEqual(processHits("sys_script", ["script"], ["needle"], { _results: [] }), []);
     assert.deepEqual(
       processHits("sys_script", ["script"], ["needle"], {
         _results: [
@@ -618,9 +575,7 @@ describe("search-core chunk", () => {
 
 describe("search-core readDictionary", () => {
   it("pre-ticks every curated code field type", () => {
-    const rows = [
-      { element: "", column_label: "Example", internal_type: "" },
-    ].concat(
+    const rows = [{ element: "", column_label: "Example", internal_type: "" }].concat(
       CODE_FIELD_TYPES.map((type) => ({
         element: `field_${type}`,
         column_label: type,
@@ -633,9 +588,7 @@ describe("search-core readDictionary", () => {
     for (const field of read.fields) {
       assert.equal(field.selected, true);
       assert.equal(field.declaredOn, "example");
-      assert.ok(
-        (CODE_FIELD_TYPES as ReadonlyArray<string>).includes(field.type),
-      );
+      assert.ok(CODE_FIELD_TYPES.some((type) => type === field.type));
     }
   });
 
@@ -825,6 +778,23 @@ describe("search-core readDictionary", () => {
     });
   });
 
+  it("does not stringify array-valued Dictionary cells", () => {
+    const read = readDictionary(
+      dictionaryPayload([
+        {
+          element: ["script"],
+          column_label: ["Script"],
+          internal_type: ["script"],
+        },
+      ]),
+      "example",
+    );
+
+    assert.deepEqual(read.fields, []);
+    assert.equal(read.label, "example");
+    assert.equal(read.found, true);
+  });
+
   it("offers inherited fields and annotates where they were declared", () => {
     const read = readDictionary(
       dictionaryPayload([
@@ -983,9 +953,7 @@ describe("search-core readQueryErrors", () => {
 
   it("keeps malformed entries as Unspecified GraphQL error", () => {
     assert.deepEqual(
-      readQueryErrors({ errors: [{}, { message: "   " }, "bare", null] }, [
-        "sys_script",
-      ]),
+      readQueryErrors({ errors: [{}, { message: "   " }, "bare", null] }, ["sys_script"]),
       [
         { tableName: "", message: "Unspecified GraphQL error" },
         { tableName: "", message: "Unspecified GraphQL error" },
@@ -1005,10 +973,7 @@ describe("search-core hasArtifactData / batchWasRejected", () => {
 
   it("detects a rejected batch when no Artifact has data", () => {
     assert.equal(
-      batchWasRejected({ data: { GlideRecord_Query: {} } }, [
-        "sys_script",
-        "u_custom",
-      ]),
+      batchWasRejected({ data: { GlideRecord_Query: {} } }, ["sys_script", "u_custom"]),
       true,
     );
     assert.equal(

@@ -13,15 +13,13 @@ its `sys_id`, with **Field matches** and their **Excerpts** beneath — and both
 Engines converge on it.
 
 A search can also be answered in part: a rejected batch, an Artifact whose
-request failed. That follows the precedent `batch update` and `batch delete`
-already set — Hits to stdout first, then a tagged error on stderr and a
-classified exit — as `SnSearchIncompleteError` at **exit 7**.
+request failed. Hits go to stdout first, followed by a tagged error on stderr
+and a classified exit, as `SnSearchIncompleteError` at **exit 7**.
 
 ## Consequences
 
-- Exit 7 is distinct from the batch codes (5, 6) so a caller can tell an
-  incomplete _search_ from partly failed _writes_. It joins a set ADR 0007 says
-  never to renumber.
+- Exit 7 is retained because ADR 0007 says classified exit codes must never be
+  renumbered.
 - Nothing is reported when nothing failed. A caveat printed on every successful
   search is a caveat nobody reads, and stderr is where ADR 0007 puts things it
   wants people to actually notice.

@@ -9,17 +9,20 @@ import { Command } from "effect/unstable/cli";
 
 import { sn } from "#src/cli.ts";
 import { emitCapture } from "#src/emit.ts";
-import { AliasFlag } from "#src/servicenow/auth.ts";
+import { AliasFlag, YesFlag } from "#src/servicenow/auth.ts";
 import { SnClient } from "#src/servicenow/client.ts";
 
 const CLI = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 
+interface AliasObservation {
+  alias?: Option.Option<string>;
+  yes?: boolean;
+}
+
 const spawn = (args: ReadonlyArray<string>) => {
-  const { stdout, stderr, status } = spawnSync(
-    process.execPath,
-    [CLI, ...args],
-    { encoding: "utf8" },
-  );
+  const { stdout, stderr, status } = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+  });
   return { stdout, stderr, code: status };
 };
 
@@ -29,17 +32,14 @@ const run = (
   writes: Array<unknown>,
 ) =>
   Effect.runPromiseExit(
-    Command.runWith(
-      sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))),
-      { version: "0.0.0-test", renderErrors: false },
-    )(args).pipe(Effect.provide(NodeServices.layer)),
+    Command.runWith(sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))), {
+      version: "0.0.0-test",
+      renderErrors: false,
+    })(args).pipe(Effect.provide(NodeServices.layer)),
   );
 
-const stubCapturingAlias = (): {
-  layer: Layer.Layer<SnClient>;
-  seen: { alias?: Option.Option<string> };
-} => {
-  const seen: { alias?: Option.Option<string> } = {};
+const stubCapturingAlias = () => {
+  const seen: AliasObservation = {};
   return {
     seen,
     layer: Layer.succeed(
@@ -47,9 +47,9 @@ const stubCapturingAlias = (): {
       SnClient.of({
         request: Effect.fn("stub.request")(function* () {
           seen.alias = yield* AliasFlag;
+          seen.yes = yield* YesFlag;
           return { result: [] };
         }),
-        token: () => Effect.die("SnClient.token unused in stub"),
       }),
     ),
   };
@@ -75,32 +75,30 @@ describe("table group", () => {
     assert.match(root.stdout, /\btable\b/);
   });
 
-  it("propagates the root Alias flag to a leaf before and after the group name", async () => {
+  it("propagates shared Alias and confirmation flags before and after the group name", async () => {
     const before = stubCapturingAlias();
     const beforeExit = await run(
-      ["--alias", "before", "table", "query", "incident"],
+      ["--alias", "before", "--yes", "table", "query", "incident"],
       before.layer,
       [],
     );
     assert.ok(Exit.isSuccess(beforeExit));
     assert.deepEqual(before.seen.alias, Option.some("before"));
+    assert.equal(before.seen.yes, true);
 
     const after = stubCapturingAlias();
     const afterExit = await run(
-      ["table", "--alias", "after", "query", "incident"],
+      ["table", "--alias", "after", "--yes", "query", "incident"],
       after.layer,
       [],
     );
     assert.ok(Exit.isSuccess(afterExit));
     assert.deepEqual(after.seen.alias, Option.some("after"));
+    assert.equal(after.seen.yes, true);
   });
 
   it("exits non-zero with an explanation for each retired flat name", () => {
-    for (const name of [
-      "query-table",
-      "get-table-schema",
-      "get-table-config",
-    ] as const) {
+    for (const name of ["query-table", "get-table-schema", "get-table-config"] as const) {
       const { stdout, stderr, code } = spawn([name, "incident"]);
       assert.notEqual(code, 0, `${name} should fail`);
       assert.match(stderr, new RegExp(`Unknown subcommand "${name}"`));

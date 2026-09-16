@@ -1,14 +1,14 @@
-import { Effect } from "effect";
+import { Effect, Predicate } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { sn } from "#src/root.ts";
 import { emitJson } from "#src/emit.ts";
-import { AliasFlag } from "#src/servicenow/auth.ts";
+import { sn } from "#src/root.ts";
+import { withAuth } from "#src/servicenow/auth.ts";
 import { SnClient } from "#src/servicenow/client.ts";
 import {
   inheritanceChain,
-  tableRows,
-  type TableRow,
+  parseTableRows,
+  type JsonTableRow,
 } from "#src/servicenow/inheritance.ts";
 
 /**
@@ -26,7 +26,7 @@ interface Category {
   /** Override the default `<link>IN<chain>` query (ACLs key off name patterns). */
   buildQuery?: (chain: string[]) => string;
   /** Override how a row's source table is derived (ACL name = "table" or "table.field"). */
-  sourceTable?: (row: TableRow) => string;
+  sourceTable?: (row: JsonTableRow) => string;
 }
 
 const CATEGORIES: Category[] = [
@@ -52,15 +52,7 @@ const CATEGORIES: Category[] = [
     id: "client_scripts",
     table: "sys_script_client",
     link: "table",
-    fields: [
-      "name",
-      "active",
-      "type",
-      "ui_type",
-      "field",
-      "condition",
-      "script",
-    ],
+    fields: ["name", "active", "type", "ui_type", "field", "condition", "script"],
   },
   {
     id: "ui_policies",
@@ -81,16 +73,7 @@ const CATEGORIES: Category[] = [
     id: "ui_actions",
     table: "sys_ui_action",
     link: "table",
-    fields: [
-      "name",
-      "active",
-      "action_name",
-      "order",
-      "client",
-      "condition",
-      "onclick",
-      "script",
-    ],
+    fields: ["name", "active", "action_name", "order", "client", "condition", "onclick", "script"],
   },
   {
     id: "acls",
@@ -98,18 +81,9 @@ const CATEGORIES: Category[] = [
     link: "name",
     // Record ACLs are named "<table>"; field ACLs "<table>.<field>". Match
     // both for every table in the chain.
-    buildQuery: (chain) =>
-      chain.map((t) => `name=${t}^ORnameSTARTSWITH${t}.`).join("^OR"),
-    sourceTable: (row) => (row.name ?? "").split(".")[0] ?? "",
-    fields: [
-      "name",
-      "operation",
-      "type",
-      "active",
-      "admin_overrides",
-      "condition",
-      "script",
-    ],
+    buildQuery: (chain) => chain.map((t) => `name=${t}^ORnameSTARTSWITH${t}.`).join("^OR"),
+    sourceTable: (row) => (Predicate.isString(row.name) ? (row.name.split(".")[0] ?? "") : ""),
+    fields: ["name", "operation", "type", "active", "admin_overrides", "condition", "script"],
   },
   {
     id: "data_policies",
@@ -128,15 +102,7 @@ const CATEGORIES: Category[] = [
     id: "notifications",
     table: "sysevent_email_action",
     link: "collection",
-    fields: [
-      "name",
-      "active",
-      "event_name",
-      "condition",
-      "subject",
-      "message",
-      "message_html",
-    ],
+    fields: ["name", "active", "event_name", "condition", "subject", "message", "message_html"],
   },
   {
     id: "workflows",
@@ -145,10 +111,7 @@ const CATEGORIES: Category[] = [
     fields: ["name", "active", "description", "condition"],
     // ponytail: classic Workflow only. Flow Designer flows (sys_hub_flow) don't
     // store the target table on the flow — the trigger table lives in a related
-    // record. The clean resolutions (sn_flow.AssociatedFlows.getFlows() via a
-    // background script, or the personalize_all.do UI page) are both blocked
-    // for a client_credentials + web-service-only integration user. Upgrade path:
-    // add a Flow Designer lookup under session (now-sdk) auth.
+    // record. Upgrade path: add a dedicated Flow Designer trigger lookup.
   },
 ];
 
@@ -156,34 +119,35 @@ const CATEGORIES: Category[] = [
 // non-empty tuple type that map() cannot prove.
 const CATEGORY_IDS = CATEGORIES.map((c) => c.id) as [string, ...string[]];
 
-const fetchCategory = Effect.fn("fetchCategory")(function* (
-  cat: Category,
-  chain: string[],
-) {
+const fetchCategory = Effect.fn("fetchCategory")(function* (cat: Category, chain: string[]) {
   const client = yield* SnClient;
-  const query = cat.buildQuery
-    ? cat.buildQuery(chain)
-    : `${cat.link}IN${chain.join(",")}`;
+  const query = cat.buildQuery ? cat.buildQuery(chain) : `${cat.link}IN${chain.join(",")}`;
   // ponytail: sysparm_limit 10000, one request per category. Ceiling: a table
   // with very many config records (or huge scripts) returns a large payload.
   // Levers: the `categories` filter and the table scope. Upgrade path: paginate.
-  const rows = tableRows(
+  const rows = yield* parseTableRows(
     yield* client.request(`/api/now/table/${cat.table}`, {
       sysparm_query: query,
       sysparm_fields: [cat.link, ...cat.fields].join(","),
       sysparm_display_value: "false",
+      sysparm_exclude_reference_link: "true",
       sysparm_limit: "10000",
     }),
   );
   const records = rows.map((row) => {
-    const source_table = cat.sourceTable ? cat.sourceTable(row) : row[cat.link];
-    // Drop the link column for default categories (it equals source_table);
-    // ACLs keep `name` because it carries the field suffix.
-    const rest = cat.sourceTable ? row : { ...row, [cat.link]: undefined };
-    const clean = Object.fromEntries(
-      Object.entries(rest).filter(([, v]) => v !== undefined),
+    const linkedTable = row[cat.link];
+    const source_table = cat.sourceTable
+      ? cat.sourceTable(row)
+      : Predicate.isString(linkedTable)
+        ? linkedTable
+        : undefined;
+    const record = { ...row, source_table };
+    return Object.fromEntries(
+      Object.entries(record).filter(
+        ([key, value]) =>
+          value !== undefined && (cat.sourceTable !== undefined || key !== cat.link),
+      ),
     );
-    return { source_table, ...clean };
   });
   return { count: records.length, records };
 });
@@ -202,30 +166,29 @@ const config = Command.make(
     ),
   },
   Effect.fn("config")(function* ({ table, categories: selectedIds }) {
-    const { alias } = yield* sn;
-    const withAlias = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      effect.pipe(Effect.provideService(AliasFlag, alias));
+    const { alias, yes } = yield* sn;
+    const withAuthContext = withAuth({ alias, yes });
 
-    const chain = yield* withAlias(inheritanceChain(table));
-    const selected =
-      selectedIds.length > 0
-        ? CATEGORIES.filter((c) => selectedIds.includes(c.id))
-        : CATEGORIES;
+    const runConfig = Effect.gen(function* () {
+      const chain = yield* inheritanceChain(table);
+      const selected =
+        selectedIds.length > 0 ? CATEGORIES.filter((c) => selectedIds.includes(c.id)) : CATEGORIES;
 
-    // Sequential: one category at a time keeps the stub-client story simple and
-    // the payload size is the real lever (categories filter), not concurrency.
-    const entries: Array<
-      [string, Effect.Success<ReturnType<typeof fetchCategory>>]
-    > = [];
-    for (const cat of selected) {
-      entries.push([cat.id, yield* withAlias(fetchCategory(cat, chain))]);
-    }
+      // Sequential: one category at a time keeps the stub-client story simple and
+      // the payload size is the real lever (categories filter), not concurrency.
+      const entries: Array<[string, Effect.Success<ReturnType<typeof fetchCategory>>]> = [];
+      for (const cat of selected) {
+        entries.push([cat.id, yield* fetchCategory(cat, chain)]);
+      }
 
-    yield* emitJson({
-      table,
-      chain,
-      categories: Object.fromEntries(entries),
+      yield* emitJson({
+        table,
+        chain,
+        categories: Object.fromEntries(entries),
+      });
     });
+
+    yield* withAuthContext(runConfig);
   }),
 ).pipe(
   Command.withDescription(

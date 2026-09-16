@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -8,8 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import pkg from "#package.json" with { type: "json" };
 
-const fromHere = (relative: string) =>
-  fileURLToPath(new URL(relative, import.meta.url));
+const fromHere = (relative: string) => fileURLToPath(new URL(relative, import.meta.url));
 
 const CLI = fromHere("../../src/cli.ts");
 const PROBE = fromHere("./fixtures/effect-shape-probe.ts");
@@ -17,17 +16,12 @@ const PROBE = fromHere("./fixtures/effect-shape-probe.ts");
 const run = (
   script: string,
   args: ReadonlyArray<string>,
-  options: { env?: Record<string, string>; cwd?: string } = {},
+  options: { env?: Record<string, string> } = {},
 ) => {
-  const { stdout, stderr, status } = spawnSync(
-    process.execPath,
-    [script, ...args],
-    {
-      encoding: "utf8",
-      cwd: options.cwd,
-      env: { ...process.env, ...options.env },
-    },
-  );
+  const { stdout, stderr, status } = spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...options.env },
+  });
   return { stdout, stderr, code: status };
 };
 
@@ -39,16 +33,40 @@ describe("sn entrypoint", () => {
     assert.match(stdout, /\bsn\b/);
   });
 
-  it("lists exactly the five groups in root help", () => {
+  it("lists exactly the Read-only CLI groups in root help", () => {
     const { stdout, code } = run(CLI, ["--help"]);
     assert.equal(code, 0);
     const section = stdout.split(/SUBCOMMANDS\n/)[1] ?? "";
     const names = [...section.matchAll(/^ {2}(\S+)/gm)].map((m) => m[1]);
-    assert.deepEqual(names, ["table", "record", "batch", "script", "rule"]);
+    assert.deepEqual(names, ["table", "script", "auth", "rule"]);
+  });
+
+  it("rejects every retired mutating command as unknown", () => {
+    for (const args of [["record"], ["batch"], ["script", "run"]] as const) {
+      const { stderr, code } = run(CLI, args);
+      assert.notEqual(code, 0, `${args.join(" ")} should fail`);
+      assert.match(stderr, new RegExp(`Unknown subcommand "${args.at(-1)}"`));
+    }
+  });
+
+  it("lists global --yes / -y flag in root help", () => {
+    const { stdout, code } = run(CLI, ["--help"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /--yes, -y/);
+    assert.match(stdout, /Skip SDK default Alias confirmation/);
+  });
+
+  it("describes the Instance Guard and OAuth Alias selection without the retired data Guard", () => {
+    const { stdout, code } = run(CLI, ["--help"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /Instance Guard/);
+    assert.match(stdout, /Blocked Instances/);
+    assert.match(stdout, /OAuth Alias/);
+    assert.doesNotMatch(stdout, /Sensitive Tables|Sensitive References|ADR 0015/);
   });
 
   it("reports the package version on stdout and exits 0 for --version", () => {
-    assert.equal(pkg.version, "3.0.0");
+    assert.equal(pkg.version, "4.0.0");
     const { stdout, code } = run(CLI, ["--version"]);
     assert.equal(code, 0);
     assert.ok(
@@ -61,7 +79,11 @@ describe("sn entrypoint", () => {
   // link" that is ours rather than pnpm's: the bin target is executable, its
   // shebang runs it through type-stripping with no build, and it finds its own
   // package.json from any working directory.
-  it("runs from its own shebang in an unrelated working directory", () => {
+  it("runs from its own shebang in an unrelated working directory", (t) => {
+    if (process.platform === "win32") {
+      t.skip("Windows does not execute shebang scripts directly via spawn");
+      return;
+    }
     const elsewhere = mkdtempSync(join(tmpdir(), "sn-cwd-"));
     const { stdout, status } = spawnSync(CLI, ["--version"], {
       encoding: "utf8",
@@ -140,22 +162,6 @@ describe(`effect ${pkg.dependencies.effect} shape probe`, () => {
     assert.notEqual(code, 0);
     assert.equal(stdout, "");
     assert.match(stderr, /kaboom/);
-  });
-
-  it("reads a redacted secret from a .env file, overridden by the real environment", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sn-probe-"));
-    writeFileSync(join(dir, ".env"), "PROBE_SECRET=from-dotenv\n");
-
-    const fromFile = run(PROBE, ["greet", "--name", "Barry"], { cwd: dir });
-    assert.equal(fromFile.code, 0);
-    assert.equal(JSON.parse(fromFile.stdout).revealed, "from-dotenv");
-
-    const fromEnv = run(PROBE, ["greet", "--name", "Barry"], {
-      cwd: dir,
-      env: { PROBE_SECRET: "from-env" },
-    });
-    assert.equal(fromEnv.code, 0);
-    assert.equal(JSON.parse(fromEnv.stdout).revealed, "from-env");
   });
 
   // Nested dispatch: a two-level tree must actually run on the pinned release

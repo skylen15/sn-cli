@@ -32,3 +32,12 @@ them either. Do not "fix" the `#src/*` entries into `tsconfig` path mapping —
 that combination type-checks and then breaks every process that imports through
 the alias. Subpath imports were verified on Node 24 during design, including a
 JSON import attribute through the manifest entry.
+
+## Amendment: the smoke check does not load `.env`
+
+The pin, the no-build rule, and the smoke check itself still stand. ADR 0018
+retired walk-up `.env` discovery; authentication is OAuth Alias only. The
+probe therefore no longer composes `ConfigProvider.fromDotEnv`. The shape it
+must still confirm on the pinned release is: subcommands, generated `--help`
+and `--version`, `Config` with `Redacted` secrets from the process
+environment, service layers with finalizers, and custom exit codes.

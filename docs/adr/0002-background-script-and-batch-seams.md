@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0019
+---
+
 # Background-script auth and batch error handling deviate from the single-seam rule
 
 ADR 0001 mandates that _all_ ServiceNow HTTP go through one Bearer-token
@@ -103,3 +107,11 @@ a failure to even start the batch (e.g. bad input) still throws.
   `try/catch` that falls back to `sys_trigger` and surfaces both errors on a
   double failure) and `batch-update`/`batch-delete` (per-item `try/catch`). Any
   _other_ command doing its own raw HTTP or `try/catch` is a smell.
+
+## Amendment: authentication is OAuth-Alias-only
+
+ADR 0018 removes client-credentials authentication. The direct `.do` path and
+`sys_trigger` fallback still branch on the response ServiceNow serves, not on an
+auth-mode check: an OAuth Alias may still identify a user with
+`web_service_access_only` enabled. Current command names are `script run`,
+`batch update`, and `batch delete`.

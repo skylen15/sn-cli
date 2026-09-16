@@ -7,8 +7,7 @@ ServiceNow-domain concepts the commands speak in — not implementation details.
 ## Language
 
 **Record**:
-A single row in a ServiceNow table, identified by its `sys_id`. The unit that
-create/update/delete and the batch commands operate on.
+A single row in a ServiceNow table, identified by its `sys_id`.
 _Avoid_: row, entry, document
 
 **Table**:
@@ -17,8 +16,7 @@ an inheritance chain — a table extends a parent, inheriting its columns.
 _Avoid_: collection, entity
 
 **sys_id**:
-The 32-character unique identifier of a Record. The handle every write and
-batch operation targets.
+The 32-character unique identifier of a Record.
 _Avoid_: id, key, guid
 
 **Encoded Query**:
@@ -50,25 +48,12 @@ A constrained set of allowed values for a field, stored in the `sys_choice`
 table. Schema discovery returns the choice list for choice-typed columns.
 _Avoid_: enum, dropdown, option set
 
-**Batch**:
-An operation applied to an explicit list of `sys_id`s (by-list, never by-query).
-Executed as a client-side loop that continues past per-item failures and
-returns a per-item status result.
-_Avoid_: bulk, mass update
-
-**Background Script**:
-Arbitrary server-side JavaScript run against the instance via the
-`sys.scripts.do` endpoint. Authenticated by session + CSRF token, not by the
-Bearer token the other commands use. Transient — executed and never stored,
-which is what separates it from a Script Record.
-_Avoid_: server script, eval, fix script
-
 **Script Record**:
 A stored Record whose fields hold server-side code — Business Rules
 (`sys_script`), Script Includes (`sys_script_include`), UI Actions
-(`sys_ui_action`) and their kin. Persisted and searched, never executed by
-`sn`, which is what separates it from a Background Script.
-_Avoid_: script, code record, custom code
+(`sys_ui_action`) and their kin. Persisted and searched; `sn` never executes
+them.
+_Avoid_: script, code record, custom code, Background Script
 
 **Alias**:
 A named ServiceNow authentication profile, carrying both the instance it points
@@ -114,14 +99,29 @@ A line of an Excerpt that itself contains the term, as against a **context
 line**, which is there only to make a neighbouring Matched line readable.
 _Avoid_: hit line
 
-**Rule Platform**:
-The agent-instruction convention targeted by one rule installation: Cursor,
-General (`AGENTS.md`), or Claude (`CLAUDE.md`). One installation targets exactly
-one Rule Platform.
-_Avoid_: agent, editor, target
-
 **Rule**:
-The shipped instructions that teach a coding agent when and how to use `sn`.
-Its core guidance is shared, while its representation follows the selected Rule
-Platform.
-_Avoid_: prompt, configuration, policy
+A project-scoped instruction file for a coding agent (here: the shipped
+`sn-cli.mdc`), installed under a Platform’s rules directory.
+_Avoid_: cursor rule, prompt, skill
+
+**Platform**:
+The agent/editor host whose on-disk layout receives a Rule. Today only
+`cursor` (→ `.cursor/rules/`).
+_Avoid_: IDE, editor, environment, target
+
+**Blocked Instance**:
+A ServiceNow instance that `sn` must not contact. Its hostname belongs to the
+fixed set enforced by the Instance Guard.
+_Avoid_: forbidden instance, sensitive instance, blocked URL
+
+**Instance Guard**:
+The always-on client-side policy that prevents `sn` from contacting a Blocked
+Instance. It prevents accidental use and is not a substitute for instance ACLs.
+_Avoid_: Guard, rule (a Rule is an agent instruction file), data filter
+
+**Read-only CLI**:
+The only distribution of `sn`. Its ServiceNow command surface cannot mutate an
+instance. That is a client-side guardrail against accidental writes, not a
+security boundary; authentication management and local-only operations such as
+Rule installation remain in bounds. There is no maintainer write variant.
+_Avoid_: Full CLI, restricted CLI, safe CLI, security mode, admin CLI, write mode

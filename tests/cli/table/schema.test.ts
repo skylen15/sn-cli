@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { NodeServices } from "@effect/platform-node";
-import { Effect, Exit, Layer } from "effect";
+import { Cause, Effect, Exit, Layer, Runtime, Schema } from "effect";
 import { Command } from "effect/unstable/cli";
 
 import { sn } from "#src/cli.ts";
 import { emitCapture } from "#src/emit.ts";
 import { SnClient } from "#src/servicenow/client.ts";
-import type { SnRequestError } from "#src/servicenow/errors.ts";
+import { SnRequestError } from "#src/servicenow/errors.ts";
 
 type Request = (
   path: string,
   params?: Record<string, string>,
-) => Effect.Effect<unknown, SnRequestError>;
+) => Effect.Effect<Schema.Json, SnRequestError>;
 
 const run = (
   args: ReadonlyArray<string>,
@@ -21,10 +21,10 @@ const run = (
   writes: Array<unknown>,
 ) =>
   Effect.runPromiseExit(
-    Command.runWith(
-      sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))),
-      { version: "0.0.0-test", renderErrors: false },
-    )(args).pipe(Effect.provide(NodeServices.layer)),
+    Command.runWith(sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))), {
+      version: "0.0.0-test",
+      renderErrors: false,
+    })(args).pipe(Effect.provide(NodeServices.layer)),
   );
 
 const stub = (impl: Request): Layer.Layer<SnClient> =>
@@ -34,7 +34,6 @@ const stub = (impl: Request): Layer.Layer<SnClient> =>
       request: Effect.fn("stub.request")(function* (path, params) {
         return yield* impl(path, params);
       }),
-      token: () => Effect.die("SnClient.token unused in stub"),
     }),
   );
 
@@ -109,13 +108,10 @@ const stubSchema: Request = (path, params) => {
 describe("table schema", () => {
   it("returns columns with shape, reference, choices, and source_table", async () => {
     const writes: unknown[] = [];
-    const exit = await run(
-      ["table", "schema", "incident"],
-      stub(stubSchema),
-      writes,
-    );
+    const exit = await run(["table", "schema", "incident"], stub(stubSchema), writes);
 
     assert.ok(Exit.isSuccess(exit));
+    // Name-ok: `reference: "sys_user"` is allowed metadata; schema never emits Record values.
     assert.deepEqual(writes, [
       {
         table: "incident",
@@ -151,6 +147,87 @@ describe("table schema", () => {
             max_length: "160",
             default_value: "",
             source_table: "task",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("reports malformed Dictionary payloads as SnRequestError", async () => {
+    const writes: unknown[] = [];
+    const exit = await run(
+      ["table", "schema", "incident"],
+      stub((path) => {
+        if (path === "/api/now/table/sys_db_object") {
+          return Effect.succeed({
+            result: [{ name: "incident", "super_class.name": "" }],
+          });
+        }
+        if (path === "/api/now/table/sys_dictionary") {
+          return Effect.succeed({ result: "not an array" });
+        }
+        return Effect.succeed({ result: [] });
+      }),
+      writes,
+    );
+
+    assert.ok(Exit.isFailure(exit));
+    assert.deepEqual(writes, []);
+    const error = Exit.match(exit, {
+      onSuccess: () => {
+        throw new Error("expected failure");
+      },
+      onFailure: (cause) => Cause.squash(cause),
+    });
+    assert.ok(error instanceof SnRequestError);
+    assert.equal(error[Runtime.errorExitCode], 4);
+    assert.match(error.message, /Malformed ServiceNow Table API response/);
+  });
+
+  it("allows inspecting schema for formerly Sensitive Tables on an allowed instance", async () => {
+    const writes: unknown[] = [];
+    const layer = stub((path) => {
+      if (path === "/api/now/table/sys_db_object") {
+        return Effect.succeed({
+          result: [{ name: "sys_user", "super_class.name": "" }],
+        });
+      }
+      if (path === "/api/now/table/sys_dictionary") {
+        return Effect.succeed({
+          result: [
+            {
+              name: "sys_user",
+              element: "user_name",
+              "internal_type.name": "string",
+              column_label: "User ID",
+              mandatory: "true",
+              max_length: "40",
+              default_value: "",
+            },
+          ],
+        });
+      }
+      if (path === "/api/now/table/sys_choice") {
+        return Effect.succeed({ result: [] });
+      }
+      return Effect.succeed({ result: [] });
+    });
+
+    const exit = await run(["table", "schema", "sys_user"], layer, writes);
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.deepEqual(writes, [
+      {
+        table: "sys_user",
+        columns: [
+          {
+            name: "user_name",
+            type: "string",
+            label: "User ID",
+            mandatory: true,
+            max_length: "40",
+            default_value: "",
+            source_table: "sys_user",
           },
         ],
       },

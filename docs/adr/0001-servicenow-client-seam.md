@@ -22,4 +22,20 @@ The seam and the fail-fast retry scope above stand. Two specifics do not, becaus
 - **The 401 retry is conditional.** Retry only when the token source returned a token genuinely different from the one that just failed. When it returned the same token, fail immediately with an error saying the token was rejected but is not expired, so it was probably revoked, and to re-authenticate. That message is worth more to the caller than a silent second attempt.
 - **We do pre-flight expiry**, reversing the "tracking expiry ourselves" option rejected above. The rejection assumed the SDK owns the clock logic safely, but its refresh path calls `process.exit(1)` from inside a catch block when a refresh fails — killing the process from library code, uncatchable, unwrappable, and bypassing the exit-code contract in ADR 0007. Since we read the credential anyway to get `instanceUrl` and `access_token`, reading `expires_at` (Unix seconds) alongside it costs one comparison and converts the most common auth failure into a real error with a real exit code. This is calibration against the platform as it actually behaves, not re-implementing the SDK's refresh.
 
-The `.do` path in ADR 0002 and the batch semantics in ADR 0003 are unaffected. For how this seam is reached from the CLI front-end, see ADR 0004; for auth mode selection, ADR 0005.
+The `.do` path and write commands were later retired by ADR 0019. For how this
+seam is reached from the CLI front-end, see ADR 0004; for current auth mode
+selection, see ADR 0018.
+
+## Amendment: OAuth Aliases are the only token source
+
+ADR 0018 supersedes ADR 0005 and removes client-credentials and dotenv-based
+configuration. `TokenSource` now resolves only Now SDK OAuth Aliases, refreshes
+inside the SDK refresh window, and maps refresh failures to `SnAuthError`.
+Re-authentication guidance points users to the global `sn auth` commands. The
+client seam still owns the conditional retry after a `401`: it retries only
+when `TokenSource` returns a different token.
+
+ADR 0017 also makes `TokenSource` the Instance Guard boundary. It rejects the
+production and UAT Blocked Instances before refresh and validates the refreshed
+token again before returning it, so the client cannot send an HTTP request to
+either hostname.

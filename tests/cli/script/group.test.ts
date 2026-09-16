@@ -14,12 +14,14 @@ import { SnClient } from "#src/servicenow/client.ts";
 
 const CLI = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 
+interface AliasObservation {
+  alias?: Option.Option<string>;
+}
+
 const spawn = (args: ReadonlyArray<string>) => {
-  const { stdout, stderr, status } = spawnSync(
-    process.execPath,
-    [CLI, ...args],
-    { encoding: "utf8" },
-  );
+  const { stdout, stderr, status } = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+  });
   return { stdout, stderr, code: status };
 };
 
@@ -29,17 +31,14 @@ const run = (
   writes: Array<unknown>,
 ) =>
   Effect.runPromiseExit(
-    Command.runWith(
-      sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))),
-      { version: "0.0.0-test", renderErrors: false },
-    )(args).pipe(Effect.provide(NodeServices.layer)),
+    Command.runWith(sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))), {
+      version: "0.0.0-test",
+      renderErrors: false,
+    })(args).pipe(Effect.provide(NodeServices.layer)),
   );
 
-const stubCapturingAlias = (): {
-  layer: Layer.Layer<SnClient>;
-  seen: { alias?: Option.Option<string> };
-} => {
-  const seen: { alias?: Option.Option<string> } = {};
+const stubCapturingAlias = () => {
+  const seen: AliasObservation = {};
   return {
     seen,
     layer: Layer.succeed(
@@ -49,7 +48,6 @@ const stubCapturingAlias = (): {
           seen.alias = yield* AliasFlag;
           return { result: [] };
         }),
-        token: () => Effect.die("SnClient.token unused in stub"),
       }),
     ),
   };
@@ -63,15 +61,21 @@ describe("script group", () => {
     assert.match(stdout, /sn script/);
   });
 
-  it("lists the group's leaves in group help and the group in root help", () => {
+  it("lists only search in Read-only CLI group help", () => {
     const group = spawn(["script", "--help"]);
     assert.equal(group.code, 0);
-    assert.match(group.stdout, /\brun\b/);
     assert.match(group.stdout, /\bsearch\b/);
+    assert.doesNotMatch(group.stdout, /^ {2}run\b/m);
 
     const root = spawn(["--help"]);
     assert.equal(root.code, 0);
     assert.match(root.stdout, /\bscript\b/);
+  });
+
+  it("rejects script run as an unknown Read-only CLI leaf", () => {
+    const { stderr, code } = spawn(["script", "run", "gs.print(1);"]);
+    assert.notEqual(code, 0);
+    assert.match(stderr, /Unknown subcommand "run"/);
   });
 
   it("propagates the root Alias flag to a leaf before and after the group name", async () => {
@@ -85,11 +89,7 @@ describe("script group", () => {
     assert.deepEqual(before.seen.alias, Option.some("before"));
 
     const after = stubCapturingAlias();
-    const afterExit = await run(
-      ["script", "--alias", "after", "search", "hello"],
-      after.layer,
-      [],
-    );
+    const afterExit = await run(["script", "--alias", "after", "search", "hello"], after.layer, []);
     assert.ok(Exit.isSuccess(afterExit));
     assert.deepEqual(after.seen.alias, Option.some("after"));
   });

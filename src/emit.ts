@@ -1,4 +1,6 @@
-import { Console, Context, Effect, Layer } from "effect";
+import { Console, Context, Effect, flow, Layer, Schema } from "effect";
+
+import { SnLocalError } from "#src/servicenow/errors.ts";
 
 /**
  * Single stdout writer for command results. Handlers produce a value and hand
@@ -8,14 +10,26 @@ import { Console, Context, Effect, Layer } from "effect";
 export class Emit extends Context.Service<
   Emit,
   {
-    readonly json: (value: unknown) => Effect.Effect<void>;
+    readonly json: (value: Schema.Json) => Effect.Effect<void>;
     readonly text: (value: string) => Effect.Effect<void>;
   }
 >()("sn/Emit") {}
 
-/** Hand a structured command result to the Emit service (compact JSON). */
-export const emitJson = (value: unknown): Effect.Effect<void, never, Emit> =>
-  Effect.flatMap(Emit, (emit) => emit.json(value));
+const parseJson = flow(
+  Schema.decodeUnknownEffect(Schema.Json),
+  Effect.mapError(
+    () =>
+      new SnLocalError({
+        message: "Command result is not valid JSON",
+      }),
+  ),
+);
+
+/** Parse and hand a structured command result to the Emit service (compact JSON). */
+export const emitJson = flow(
+  parseJson,
+  Effect.flatMap((json) => Effect.flatMap(Emit, (emit) => emit.json(json))),
+);
 
 /** Hand a human-readable summary to the Emit service (raw text on stdout). */
 export const emitText = (value: string): Effect.Effect<void, never, Emit> =>

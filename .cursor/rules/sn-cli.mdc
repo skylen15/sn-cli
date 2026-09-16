@@ -1,0 +1,20 @@
+---
+description: Read live ServiceNow schema, data, configuration, and code via `sn`
+alwaysApply: true
+---
+
+# Live ServiceNow via `sn` CLI
+
+For **instance-specific** facts (schema, live data, table config, existing code), use `sn` on PATH. Do not guess field names, types, or choices. Generic product/API behaviour stays with `sn-docs`.
+
+Every `sn` Shell call uses `required_permissions: ["full_network"]` (instance HTTPS). The sandbox can read the OS keychain; it cannot resolve ServiceNow hosts.
+
+Run freely when the answer depends on this instance:
+
+- `sn table query|schema|config`
+- `sn script search`
+
+## How
+
+- Learn flags from `sn <group> <leaf> --help` — do not guess.
+- Sort inside `--query` with `ORDERBY` / `ORDERBYDESC`.

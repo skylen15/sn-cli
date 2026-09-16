@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { NodeServices } from "@effect/platform-node";
-import { Cause, Effect, Exit, Layer, Runtime } from "effect";
+import { Cause, Effect, Exit, Layer, Runtime, Schema } from "effect";
 import { Command } from "effect/unstable/cli";
 
 import { sn } from "#src/cli.ts";
@@ -13,18 +13,16 @@ import { SnClient, type RequestOptions } from "#src/servicenow/client.ts";
 import {
   isSnError,
   SnRequestError,
+  SnSearchIncompleteError,
   snErrorJson,
-  type SnSearchIncompleteError,
 } from "#src/servicenow/errors.ts";
 
 const CLI = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 
 const spawn = (args: ReadonlyArray<string>) => {
-  const { stdout, stderr, status } = spawnSync(
-    process.execPath,
-    [CLI, ...args],
-    { encoding: "utf8" },
-  );
+  const { stdout, stderr, status } = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+  });
   return { stdout, stderr, code: status };
 };
 
@@ -34,11 +32,23 @@ type Seen = {
   options?: RequestOptions;
 };
 
+type Stub = {
+  layer: Layer.Layer<SnClient>;
+  seen: Seen;
+};
+
+const decodeText = Schema.decodeUnknownSync(Schema.String);
+const decodeGraphqlBody = Schema.decodeUnknownSync(
+  Schema.Struct({ query: Schema.optional(Schema.String) }),
+);
+const decodeJsonArray = Schema.decodeUnknownSync(Schema.Array(Schema.Json));
+const malformedGraphqlErrors = decodeJsonArray([{ message: "Global validation failed" }, {}]);
+
 type Request = (
   path: string,
   params?: Record<string, string>,
   options?: RequestOptions,
-) => Effect.Effect<unknown, SnRequestError>;
+) => Effect.Effect<Schema.Json, SnRequestError>;
 
 const run = (
   args: ReadonlyArray<string>,
@@ -47,10 +57,10 @@ const run = (
   stderr: string[] = [],
 ) =>
   Effect.runPromiseExit(
-    Command.runWith(
-      sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))),
-      { version: "0.0.0-test", renderErrors: false },
-    )(args).pipe(
+    Command.runWith(sn.pipe(Command.provide(Layer.merge(clientLayer, emitCapture(writes)))), {
+      version: "0.0.0-test",
+      renderErrors: false,
+    })(args).pipe(
       Effect.tapError((error) =>
         isSnError(error)
           ? Effect.sync(() => {
@@ -62,7 +72,7 @@ const run = (
     ),
   );
 
-const stub = (impl: Request): { layer: Layer.Layer<SnClient>; seen: Seen } => {
+const stub = (impl: Request): Stub => {
   const seen: Seen = {};
   return {
     seen,
@@ -70,12 +80,18 @@ const stub = (impl: Request): { layer: Layer.Layer<SnClient>; seen: Seen } => {
       SnClient,
       SnClient.of({
         request: Effect.fn("stub.request")(function* (path, params, options) {
+          // Guard Ext: Exact names short-circuit; everything else needs a chain.
+          if (path === "/api/now/table/sys_db_object") {
+            const name = params?.sysparm_query?.replace(/^name=/, "") ?? "unknown";
+            return {
+              result: [{ name, "super_class.name": "" }],
+            };
+          }
           seen.path = path;
           seen.params = params;
           seen.options = options;
           return yield* impl(path, params, options);
         }),
-        token: () => Effect.die("SnClient.token unused in stub"),
       }),
     ),
   };
@@ -91,10 +107,7 @@ const stubSysScriptDictionary: Request = (path, params, options) => {
   }
   if (path === "/api/now/table/sys_dictionary") {
     assert.equal(params?.sysparm_query, "nameINsys_script^ORDERBYelement");
-    assert.equal(
-      params?.sysparm_fields,
-      "name,element,column_label,internal_type",
-    );
+    assert.equal(params?.sysparm_fields, "name,element,column_label,internal_type");
     assert.equal(params?.sysparm_display_value, "all");
     return Effect.succeed({
       result: [
@@ -166,66 +179,6 @@ const stubSysScriptDictionary: Request = (path, params, options) => {
   return Effect.succeed({ result: [] });
 };
 
-/** One group, one Record, two Field matches (script + condition). */
-const groupsResponse = {
-  result: [
-    {
-      recordType: "sys_script",
-      tableLabel: "Business Rules",
-      hits: [
-        {
-          sysId: "abc123def456abc123def456abc123de",
-          name: "My BR",
-          className: "sys_script",
-          tableLabel: "Business Rules",
-          matches: [
-            {
-              field: "script",
-              fieldLabel: "Script",
-              lineMatches: [
-                {
-                  line: 12,
-                  context: "gs.info('hello')",
-                  escaped: "gs.info(&#39;hello&#39;)",
-                },
-                { line: 40, context: "var x = hello;" },
-              ],
-            },
-            {
-              field: "condition",
-              fieldLabel: "Condition",
-              lineMatches: [{ line: 1, context: "hello == true" }],
-            },
-          ],
-        },
-      ],
-    },
-  ],
-};
-
-const expectedHit = {
-  sysId: "abc123def456abc123def456abc123de",
-  name: "My BR",
-  table: "sys_script",
-  fieldMatches: [
-    {
-      field: "script",
-      matchedLineCount: 2,
-      omittedMatchedLines: 0,
-      lines: [
-        { lineNumber: 12, content: "gs.info('hello')", matched: true },
-        { lineNumber: 40, content: "var x = hello;", matched: true },
-      ],
-    },
-    {
-      field: "condition",
-      matchedLineCount: 1,
-      omittedMatchedLines: 0,
-      lines: [{ lineNumber: 1, content: "hello == true", matched: true }],
-    },
-  ],
-};
-
 const graphqlStemMissResponse = {
   data: {
     GlideRecord_Query: {
@@ -246,22 +199,6 @@ const graphqlStemMissResponse = {
 };
 
 describe("script search", () => {
-  it("returns one Hit with sysId and two Field matches for one Record", async () => {
-    const writes: unknown[] = [];
-    const { layer, seen } = stub(() => Effect.succeed(groupsResponse));
-    const exit = await run(
-      ["script", "search", "hello", "--engine", "native", "--limit", "50"],
-      layer,
-      writes,
-    );
-
-    assert.ok(Exit.isSuccess(exit));
-    assert.equal(seen.path, "/api/sn_codesearch/code_search/search");
-    assert.equal(seen.params?.term, "hello");
-    assert.equal(seen.params?.limit, "50");
-    assert.deepEqual(writes, [[expectedHit]]);
-  });
-
   it("defaults --engine to graphql", async () => {
     const writes: unknown[] = [];
     const paths: string[] = [];
@@ -291,57 +228,152 @@ describe("script search", () => {
     assert.ok(!paths.includes("/api/sn_codesearch/code_search/search"));
   });
 
-  it("still returns the Hit model on --engine native", async () => {
+  it("runs --engine native against Studio search endpoint and forwards flags", async () => {
     const writes: unknown[] = [];
-    const { layer, seen } = stub(() => Effect.succeed(groupsResponse));
+    const stderr: string[] = [];
+    const { layer, seen } = stub((path) => {
+      if (path === "/api/sn_codesearch/code_search/search") {
+        return Effect.succeed({
+          result: [
+            {
+              recordType: "sys_script",
+              hits: [
+                {
+                  sysId: "rule1",
+                  name: "Sample Rule",
+                  className: "sys_script",
+                  matches: [
+                    {
+                      field: "Script",
+                      lineMatches: [{ line: 10, context: "hello world" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      }
+      return Effect.succeed({ result: [] });
+    });
     const exit = await run(
-      ["script", "search", "hello", "--engine", "native"],
+      [
+        "script",
+        "search",
+        "hello",
+        "--engine",
+        "native",
+        "--search-all-scopes",
+        "false",
+        "--current-app",
+        "x_myapp",
+        "--limit",
+        "25",
+      ],
       layer,
       writes,
+      stderr,
     );
 
     assert.ok(Exit.isSuccess(exit));
     assert.equal(seen.path, "/api/sn_codesearch/code_search/search");
-    assert.deepEqual(writes, [[expectedHit]]);
+    assert.equal(seen.params?.term, "hello");
+    assert.equal(seen.params?.search_all_scopes, "false");
+    assert.equal(seen.params?.current_app, "x_myapp");
+    assert.equal(seen.params?.limit, "25");
+    assert.deepEqual(writes, [
+      [
+        {
+          sysId: "rule1",
+          name: "Sample Rule",
+          table: "sys_script",
+          fieldMatches: [
+            {
+              field: "Script",
+              matchedLineCount: 1,
+              omittedMatchedLines: 0,
+              lines: [
+                {
+                  lineNumber: 10,
+                  content: "hello world",
+                  matched: true,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    ]);
   });
 
   it("normalises a single-object result to the same Hit array shape", async () => {
     const writes: unknown[] = [];
     const { layer } = stub(() =>
-      Effect.succeed({ result: groupsResponse.result[0] }),
+      Effect.succeed({
+        result: {
+          recordType: "sys_script",
+          hits: [
+            {
+              sysId: "rule1",
+              name: "Sample Rule",
+              className: "sys_script",
+              matches: [
+                {
+                  field: "Script",
+                  lineMatches: [{ line: 10, context: "hello world" }],
+                },
+              ],
+            },
+          ],
+        },
+      }),
     );
-    const exit = await run(
-      ["script", "search", "hello", "--engine", "native"],
-      layer,
-      writes,
-    );
+    const exit = await run(["script", "search", "hello", "--engine", "native"], layer, writes);
 
     assert.ok(Exit.isSuccess(exit));
-    assert.deepEqual(writes, [[expectedHit]]);
+    assert.deepEqual(writes, [
+      [
+        {
+          sysId: "rule1",
+          name: "Sample Rule",
+          table: "sys_script",
+          fieldMatches: [
+            {
+              field: "Script",
+              matchedLineCount: 1,
+              omittedMatchedLines: 0,
+              lines: [
+                {
+                  lineNumber: 10,
+                  content: "hello world",
+                  matched: true,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    ]);
   });
 
   it("renders --format text grouping Field matches under their Record", async () => {
     const writes: unknown[] = [];
-    const { layer } = stub(() => Effect.succeed(groupsResponse));
+    const { layer } = stub(stubSysScriptDictionary);
     const exit = await run(
-      ["script", "search", "hello", "--engine", "native", "--format", "text"],
+      ["script", "search", "gs.info", "--table", "sys_script", "--format", "text"],
       layer,
       writes,
     );
 
     assert.ok(Exit.isSuccess(exit));
     assert.equal(writes.length, 1);
-    const text = writes[0];
-    assert.equal(typeof text, "string");
-    assert.match(text as string, /Found 1 hits?/);
-    assert.match(
-      text as string,
-      /sys_script > My BR \(abc123def456abc123def456abc123de\)/,
-    );
-    assert.match(text as string, /script \(2\)/);
-    assert.match(text as string, /condition \(1\)/);
-    assert.match(text as string, /L12: gs\.info\('hello'\)/);
-    assert.match(text as string, /L1: hello == true/);
+    const text = decodeText(writes[0]);
+    assert.match(text, /Found 1 hits?/);
+    assert.match(text, /sys_script > GraphQL BR \(gql123\)/);
+    assert.match(text, /script \(1\)/);
+    assert.match(text, /condition \(1\)/);
+    assert.match(text, /L2: gs\.info\('needle'\)/);
+    assert.match(text, /L1: gs\.info\('in condition'\)/);
   });
 
   it("marks context lines apart from Matched lines in --format text", async () => {
@@ -389,27 +421,13 @@ describe("script search", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    const text = writes[0];
-    assert.equal(typeof text, "string");
-    assert.match(text as string, /L1- before;/);
-    assert.match(text as string, /L2: needle here;/);
-    assert.match(text as string, /L3- after;/);
+    const text = decodeText(writes[0]);
+    assert.match(text, /L1- before;/);
+    assert.match(text, /L2: needle here;/);
+    assert.match(text, /L3- after;/);
   });
 
-  it("returns an empty array when there are no Hits", async () => {
-    const writes: unknown[] = [];
-    const { layer } = stub(() => Effect.succeed({ result: [] }));
-    const exit = await run(
-      ["script", "search", "zzzz-no-match", "--engine", "native"],
-      layer,
-      writes,
-    );
-
-    assert.ok(Exit.isSuccess(exit));
-    assert.deepEqual(writes, [[]]);
-  });
-
-  it("names --engine native on a GraphQL failure and never falls back", async () => {
+  it("fails loudly on a GraphQL failure and never falls back to Code Search", async () => {
     const writes: unknown[] = [];
     const stderr: string[] = [];
     const paths: string[] = [];
@@ -443,15 +461,7 @@ describe("script search", () => {
       return Effect.succeed({ result: [] });
     });
     const exit = await run(
-      [
-        "script",
-        "search",
-        "needle",
-        "--table",
-        "sys_script",
-        "--field",
-        "script",
-      ],
+      ["script", "search", "needle", "--table", "sys_script", "--field", "script"],
       layer,
       writes,
       stderr,
@@ -465,10 +475,15 @@ describe("script search", () => {
         throw new Error("expected failure");
       },
       onFailure: (cause) => Cause.squash(cause),
-    }) as SnRequestError;
+    });
+    assert.ok(error instanceof SnRequestError);
     assert.equal(error._tag, "SnRequestError");
-    assert.match(error.message, /--engine native/);
+    assert.match(error.message, /HTTP 403/);
     assert.match(stderr[0] ?? "", /--engine native/);
+    assert.equal(
+      JSON.parse(stderr[0]!).hint,
+      "Retry with `--engine native` if GraphQL is unavailable on this instance.",
+    );
   });
 
   it("does not probe capability before searching", async () => {
@@ -525,7 +540,7 @@ describe("script search --engine graphql", () => {
     assert.ok(Exit.isSuccess(exit));
     assert.equal(seen.path, "/api/now/graphql");
     assert.equal(seen.options?.method, "POST");
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEgs.info", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -631,22 +646,14 @@ describe("script search --engine graphql", () => {
     const writes: unknown[] = [];
     const { layer, seen } = stub(stubSysScriptDictionary);
     const exit = await run(
-      [
-        "script",
-        "search",
-        "gs.info",
-        "--engine",
-        "graphql",
-        "--table",
-        "sys_script",
-      ],
+      ["script", "search", "gs.info", "--engine", "graphql", "--table", "sys_script"],
       layer,
       writes,
     );
 
     assert.ok(Exit.isSuccess(exit));
     assert.equal(seen.path, "/api/now/graphql");
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEgs.info^ORconditionLIKEgs.info", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } condition { value displayValue } } } } }',
@@ -722,13 +729,11 @@ describe("script search --engine graphql", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    assert.deepEqual(paths, [
-      "/api/now/table/sys_db_object",
-      "/api/now/table/sys_dictionary",
-      "/api/now/graphql",
-    ]);
+    // Guard Ext / Artifact inheritance hits sys_db_object via the shared stub
+    // intercept; data-plane paths recorded here are Dictionary then GraphQL.
+    assert.deepEqual(paths, ["/api/now/table/sys_dictionary", "/api/now/graphql"]);
     assert.equal(seen.path, "/api/now/graphql");
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEgs.info", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -756,7 +761,7 @@ describe("script search --engine graphql", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "scriptLIKEgs.info", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -785,7 +790,7 @@ describe("script search --engine graphql", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEalpha^NQactive=true^scriptLIKEbeta", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -814,7 +819,7 @@ describe("script search --engine graphql", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEalpha^active=true^scriptLIKEbeta", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -843,18 +848,11 @@ describe("script search --engine graphql", () => {
       }
       return Effect.succeed({ result: [] });
     });
-    const exit = await run(
-      ["script", "search", "needle", "--engine", "graphql"],
-      layer,
-      writes,
-    );
+    const exit = await run(["script", "search", "needle", "--engine", "graphql"], layer, writes);
 
     assert.ok(Exit.isSuccess(exit));
-    const body = seen.options?.body as { query?: string } | undefined;
-    assert.match(
-      body?.query ?? "",
-      /u_no_active\(queryConditions: "scriptLIKEneedle"/,
-    );
+    const body = decodeGraphqlBody(seen.options?.body);
+    assert.match(body?.query ?? "", /u_no_active\(queryConditions: "scriptLIKEneedle"/);
     assert.doesNotMatch(body?.query ?? "", /active=true/);
   });
 
@@ -878,7 +876,7 @@ describe("script search --engine graphql", () => {
     );
 
     assert.ok(Exit.isSuccess(exit));
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.equal(
       body?.query,
       'query { GlideRecord_Query { sys_script(queryConditions: "active=true^scriptLIKEtable:sys_script", pagination: { limit: 50 }, omitCount: false) { _rowCount _results { sys_id { value } sys_name { value displayValue } sys_class_name { value } script { value displayValue } } } } }',
@@ -918,15 +916,7 @@ describe("script search --engine graphql", () => {
       return Effect.succeed({ result: [] });
     });
     const exit = await run(
-      [
-        "script",
-        "search",
-        "needle",
-        "--engine",
-        "graphql",
-        "--table",
-        "numbers_only",
-      ],
+      ["script", "search", "needle", "--engine", "graphql", "--table", "numbers_only"],
       layer,
       writes,
       stderr,
@@ -939,7 +929,8 @@ describe("script search --engine graphql", () => {
         throw new Error("expected failure");
       },
       onFailure: (cause) => Cause.squash(cause),
-    }) as SnRequestError;
+    });
+    assert.ok(error instanceof SnRequestError);
     assert.equal(error._tag, "SnRequestError");
     assert.equal(error[Runtime.errorExitCode], 4);
     assert.match(error.message, /no code fields/);
@@ -968,46 +959,32 @@ describe("script search --engine graphql", () => {
         return Effect.succeed({ result: dictionaryRows });
       }
       if (path === "/api/now/graphql") {
-        const query = (options?.body as { query?: string } | undefined)?.query;
-        if (typeof query !== "string") {
-          throw new assert.AssertionError({
-            message: "expected GraphQL query",
-          });
-        }
+        const query = decodeGraphqlBody(options?.body).query;
+        assert.ok(query);
         graphqlQueries.push(query);
-        const glide: Record<string, { _results: unknown[] }> = {};
+        const glide: Record<string, { _results: Schema.Json[] }> = {};
         for (const match of query.matchAll(/\b(u_code_\d+)\(/g)) {
-          glide[match[1]!] = { _results: [] };
+          const table = match[1];
+          if (table !== undefined) {
+            glide[table] = { _results: [] };
+          }
         }
         return Effect.succeed({ data: { GlideRecord_Query: glide } });
       }
       return Effect.succeed({ result: [] });
     });
-    const exit = await run(
-      ["script", "search", "gs.info", "--engine", "graphql"],
-      layer,
-      writes,
-    );
+    const exit = await run(["script", "search", "gs.info", "--engine", "graphql"], layer, writes);
 
     assert.ok(Exit.isSuccess(exit));
     assert.equal(graphqlQueries.length, 3);
     const [batch0, batch1, batch2] = graphqlQueries;
     assert.ok(batch0 && batch1 && batch2);
     for (let i = 0; i < 10; i += 1) {
-      assert.match(
-        batch0,
-        new RegExp(`u_code_${String(i).padStart(2, "0")}\\(`),
-      );
-      assert.match(
-        batch1,
-        new RegExp(`u_code_${String(i + 10).padStart(2, "0")}\\(`),
-      );
+      assert.match(batch0, new RegExp(`u_code_${String(i).padStart(2, "0")}\\(`));
+      assert.match(batch1, new RegExp(`u_code_${String(i + 10).padStart(2, "0")}\\(`));
     }
     for (let i = 20; i < 25; i += 1) {
-      assert.match(
-        batch2,
-        new RegExp(`u_code_${String(i).padStart(2, "0")}\\(`),
-      );
+      assert.match(batch2, new RegExp(`u_code_${String(i).padStart(2, "0")}\\(`));
     }
     assert.doesNotMatch(batch0, /u_code_10\(/);
     assert.doesNotMatch(batch2, /u_code_19\(/);
@@ -1036,8 +1013,7 @@ describe("script search --engine graphql", () => {
         });
       }
       if (path === "/api/now/graphql") {
-        const query =
-          (options?.body as { query?: string } | undefined)?.query ?? "";
+        const query = decodeGraphqlBody(options?.body).query ?? "";
         assert.match(query, /sys_script\(/);
         assert.match(query, /u_custom\(/);
         return Effect.succeed({
@@ -1071,11 +1047,7 @@ describe("script search --engine graphql", () => {
       }
       return Effect.succeed({ result: [] });
     });
-    const exit = await run(
-      ["script", "search", "needle", "--engine", "graphql"],
-      layer,
-      writes,
-    );
+    const exit = await run(["script", "search", "needle", "--engine", "graphql"], layer, writes);
 
     assert.ok(Exit.isSuccess(exit));
     assert.deepEqual(writes, [
@@ -1133,26 +1105,144 @@ describe("script search --engine graphql", () => {
       return stubSysScriptDictionary(path, params, options);
     });
     const exit = await run(
-      [
-        "script",
-        "search",
-        "gs.info",
-        "--engine",
-        "graphql",
-        "--table",
-        "sys_script",
-      ],
+      ["script", "search", "gs.info", "--engine", "graphql", "--table", "sys_script"],
       layer,
       writes,
     );
 
     assert.ok(Exit.isSuccess(exit));
-    assert.ok(paths.includes("/api/now/table/sys_db_object"));
     assert.ok(paths.includes("/api/now/table/sys_dictionary"));
     assert.ok(paths.includes("/api/now/graphql"));
-    const body = seen.options?.body as { query?: string } | undefined;
+    const body = decodeGraphqlBody(seen.options?.body);
     assert.match(body?.query ?? "", /sys_script\(/);
     assert.doesNotMatch(body?.query ?? "", /u_custom/);
+  });
+
+  it("allows --table on formerly Sensitive Tables on an allowed instance", async () => {
+    const writes: unknown[] = [];
+    const stderr: string[] = [];
+    const paths: string[] = [];
+    const { layer } = stub((path, params, options) => {
+      paths.push(path);
+      if (path === "/api/now/table/sys_db_object") {
+        return Effect.succeed({
+          result: [{ name: "sys_user", "super_class.name": "" }],
+        });
+      }
+      if (path === "/api/now/table/sys_dictionary") {
+        return Effect.succeed({
+          result: [
+            {
+              name: { value: "sys_user", display_value: "sys_user" },
+              element: { value: "script", display_value: "script" },
+              column_label: { value: "Script", display_value: "Script" },
+              internal_type: { value: "script", display_value: "Script" },
+            },
+          ],
+        });
+      }
+      if (path === "/api/now/graphql") {
+        return Effect.succeed({
+          data: {
+            GlideRecord_Query: {
+              sys_user: { _rowCount: 0, _results: [] },
+            },
+          },
+        });
+      }
+      return Effect.succeed({ result: [] });
+    });
+    const exit = await run(
+      ["script", "search", "needle", "--engine", "graphql", "--table", "sys_user"],
+      layer,
+      writes,
+      stderr,
+    );
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.ok(paths.includes("/api/now/graphql"));
+    assert.deepEqual(writes, [[]]);
+  });
+
+  it("searches formerly Sensitive Artifacts when discovered", async () => {
+    const writes: unknown[] = [];
+    const graphqlBodies: string[] = [];
+    const { layer } = stub((path, _params, options) => {
+      if (path === "/api/now/table/sys_dictionary") {
+        return Effect.succeed({
+          result: [
+            {
+              name: { value: "sys_script", display_value: "sys_script" },
+              element: { value: "script", display_value: "script" },
+              column_label: { value: "Script", display_value: "Script" },
+              internal_type: { value: "script", display_value: "Script" },
+            },
+            {
+              name: { value: "sys_user", display_value: "sys_user" },
+              element: { value: "script", display_value: "script" },
+              column_label: { value: "Script", display_value: "Script" },
+              internal_type: { value: "script", display_value: "Script" },
+            },
+          ],
+        });
+      }
+      if (path === "/api/now/graphql") {
+        const body = decodeGraphqlBody(options?.body);
+        graphqlBodies.push(body?.query ?? "");
+        return Effect.succeed({
+          data: {
+            GlideRecord_Query: {
+              sys_script: { _rowCount: 0, _results: [] },
+              sys_user: { _rowCount: 0, _results: [] },
+            },
+          },
+        });
+      }
+      return Effect.succeed({ result: [] });
+    });
+    const exit = await run(["script", "search", "needle", "--engine", "graphql"], layer, writes);
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.equal(graphqlBodies.length, 1);
+    assert.match(graphqlBodies[0] ?? "", /sys_script\(/);
+    assert.match(graphqlBodies[0] ?? "", /sys_user\(/);
+    assert.deepEqual(writes, [[]]);
+  });
+
+  it("fetches via GraphQL even when all discovered Artifacts were formerly Sensitive", async () => {
+    const writes: unknown[] = [];
+    const paths: string[] = [];
+    const { layer } = stub((path) => {
+      paths.push(path);
+      if (path === "/api/now/table/sys_dictionary") {
+        return Effect.succeed({
+          result: [
+            {
+              name: { value: "sys_user", display_value: "sys_user" },
+              element: { value: "script", display_value: "script" },
+              column_label: { value: "Script", display_value: "Script" },
+              internal_type: { value: "script", display_value: "Script" },
+            },
+          ],
+        });
+      }
+      if (path === "/api/now/graphql") {
+        return Effect.succeed({
+          data: {
+            GlideRecord_Query: {
+              sys_user: { _rowCount: 0, _results: [] },
+            },
+          },
+        });
+      }
+      return Effect.succeed({ result: [] });
+    });
+    const exit = await run(["script", "search", "needle", "--engine", "graphql"], layer, writes);
+
+    assert.ok(Exit.isSuccess(exit));
+    assert.ok(paths.includes("/api/now/table/sys_dictionary"));
+    assert.ok(paths.includes("/api/now/graphql"));
+    assert.deepEqual(writes, [[]]);
   });
 
   it("emits Hits then exits 7 when one Artifact fails and the rest succeed", async () => {
@@ -1241,13 +1331,15 @@ describe("script search --engine graphql", () => {
         throw new Error("expected failure");
       },
       onFailure: (cause) => Cause.squash(cause),
-    }) as SnSearchIncompleteError;
+    });
+    assert.ok(error instanceof SnSearchIncompleteError);
     assert.equal(error._tag, "SnSearchIncompleteError");
     assert.equal(error[Runtime.errorExitCode], 7);
     assert.equal(stderr.length, 1);
     assert.deepEqual(JSON.parse(stderr[0]!), {
       _tag: "SnSearchIncompleteError",
       message: "1 search failure across 2 artifacts",
+      hint: "Inspect `reasons` and `unsearched`; keep the Hits already written to stdout.",
       failed: 1,
       total: 2,
       reasons: [
@@ -1330,22 +1422,14 @@ describe("script search --engine graphql", () => {
               sys_script: { _results: [] },
             },
           },
-          errors: [{ message: "Global validation failed" }, {}],
+          errors: malformedGraphqlErrors,
         });
       }
       return Effect.succeed({ result: [] });
     });
 
     const exit = await run(
-      [
-        "script",
-        "search",
-        "needle",
-        "--engine",
-        "graphql",
-        "--table",
-        "sys_script",
-      ],
+      ["script", "search", "needle", "--engine", "graphql", "--table", "sys_script"],
       layer,
       writes,
       stderr,
@@ -1385,8 +1469,7 @@ describe("script search --engine graphql", () => {
         });
       }
       if (path === "/api/now/graphql") {
-        const query =
-          (options?.body as { query?: string } | undefined)?.query ?? "";
+        const query = decodeGraphqlBody(options?.body).query ?? "";
         graphqlQueries.push(query);
         if (query.includes("sys_script(") && query.includes("u_bad(")) {
           return Effect.succeed({
@@ -1433,22 +1516,11 @@ describe("script search --engine graphql", () => {
     );
 
     assert.equal(graphqlQueries.length, 3);
-    assert.ok(
-      graphqlQueries[0]!.includes("sys_script(") &&
-        graphqlQueries[0]!.includes("u_bad("),
-    );
-    assert.ok(
-      graphqlQueries.some(
-        (q) => q.includes("sys_script(") && !q.includes("u_bad("),
-      ),
-    );
-    assert.ok(
-      graphqlQueries.some(
-        (q) => q.includes("u_bad(") && !q.includes("sys_script("),
-      ),
-    );
+    assert.ok(graphqlQueries[0]!.includes("sys_script(") && graphqlQueries[0]!.includes("u_bad("));
+    assert.ok(graphqlQueries.some((q) => q.includes("sys_script(") && !q.includes("u_bad(")));
+    assert.ok(graphqlQueries.some((q) => q.includes("u_bad(") && !q.includes("sys_script(")));
     assert.equal(Exit.isSuccess(exit), false);
-    assert.equal((writes[0] as unknown[]).length, 1);
+    assert.equal(decodeJsonArray(writes[0]).length, 1);
     const payload = JSON.parse(stderr[0]!);
     assert.equal(payload.failed, 1);
     assert.deepEqual(payload.reasons, [
@@ -1480,9 +1552,7 @@ describe("script search --engine graphql", () => {
         });
       }
       if (path === "/api/now/graphql") {
-        graphqlQueries.push(
-          (options?.body as { query?: string } | undefined)?.query ?? "",
-        );
+        graphqlQueries.push(decodeGraphqlBody(options?.body).query ?? "");
         return Effect.succeed({
           data: {
             GlideRecord_Query: {
@@ -1519,15 +1589,7 @@ describe("script search --engine graphql", () => {
     const stderr: string[] = [];
     const { layer } = stub(stubSysScriptDictionary);
     const exit = await run(
-      [
-        "script",
-        "search",
-        "gs.info",
-        "--engine",
-        "graphql",
-        "--table",
-        "sys_script",
-      ],
+      ["script", "search", "gs.info", "--engine", "graphql", "--table", "sys_script"],
       layer,
       writes,
       stderr,
@@ -1535,25 +1597,30 @@ describe("script search --engine graphql", () => {
 
     assert.ok(Exit.isSuccess(exit));
     assert.deepEqual(stderr, []);
-    assert.ok((writes[0] as unknown[]).length > 0);
+    assert.ok(decodeJsonArray(writes[0]).length > 0);
   });
 });
 
 describe("script search --help", () => {
-  it("documents every flag added for the GraphQL Engine", () => {
+  it("documents every flag the GraphQL Engine takes", () => {
     const { stdout, code } = spawn(["script", "search", "--help"]);
     assert.equal(code, 0);
     assert.match(stdout, /--engine/);
     assert.match(stdout, /graphql/);
-    assert.match(stdout, /native/);
     assert.match(stdout, /--table/);
     assert.match(stdout, /--field/);
     assert.match(stdout, /--match-mode/);
     assert.match(stdout, /--include-inactive/);
-    assert.match(stdout, /--search-all-scopes/);
-    assert.match(stdout, /--current-app/);
     assert.match(stdout, /--limit/);
     assert.match(stdout, /--format/);
-    assert.match(stdout, /Defaults to the GraphQL Engine/);
+  });
+
+  it("documents both graphql and native engines in help", () => {
+    const { stdout, code } = spawn(["script", "search", "--help"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /graphql.*native/s);
+    assert.doesNotMatch(stdout, /blocked by the Guard/);
+    assert.match(stdout, /--search-all-scopes/);
+    assert.match(stdout, /--current-app/);
   });
 });

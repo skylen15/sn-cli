@@ -67,3 +67,11 @@ over the Table API** instead.
 - The category map is the maintenance surface for `get_table_config`: adding a
   behaviour type = one entry; an irregular link = a `buildQuery`/`sourceTable`
   override (as ACLs already do).
+
+## Amendment: authentication and command names changed
+
+ADR 0018 removes the client-credentials premise; an OAuth Alias can still name
+a user with `web_service_access_only` enabled, so `table config` continues to
+use the Table API rather than a UI page. The commands are now `script search`
+and `table config`. Their current search Engine and Hit contracts are defined
+by ADRs 0011 and 0012.

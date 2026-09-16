@@ -2,10 +2,10 @@ import { Command } from "effect/unstable/cli";
 
 import { install } from "#src/commands/rule/install.ts";
 
-/** Rule group: install local agent instructions without contacting ServiceNow. */
+/** Rule group: install shipped agent Rules into a Platform's on-disk layout. */
 export const rule = Command.make("rule").pipe(
   Command.withDescription(
-    "Install sn agent instructions for Cursor, General, or Claude",
+    "Install shipped Rules into a Platform's project rules directory (local filesystem only; outside the Instance Guard)",
   ),
   Command.withSubcommands([install]),
 );

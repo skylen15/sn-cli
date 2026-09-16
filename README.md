@@ -14,8 +14,16 @@ Repository: [https://github.com/skylen15/sn-cli](https://github.com/skylen15/sn-
 
 ## Install
 
+### macOS / Linux / Git Bash
+
 ```bash
 curl -fsSL https://github.com/skylen15/sn-cli/raw/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://github.com/skylen15/sn-cli/raw/main/install.ps1 | iex
 ```
 
 The installer clones `main` into `~/sn-cli` when that path does not exist, updates `main` when it does, and runs `pnpm add --global .` so `sn` is linked to your `PATH`. Set `SN_INSTALL_DIR` to use a different directory.
